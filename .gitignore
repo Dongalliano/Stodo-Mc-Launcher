@@ -5,7 +5,6 @@ auth-cache/
 node_modules/
 
 # PyInstaller output
-build/
 dist/
 *.spec
 

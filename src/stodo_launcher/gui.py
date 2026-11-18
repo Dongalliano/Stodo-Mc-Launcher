@@ -9,6 +9,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from PIL import Image, ImageOps, ImageTk
 import minecraft_launcher_lib as mll
 
 from . import updater
@@ -21,15 +22,19 @@ ROOT_DIR = (
 )
 
 COLORS = {
-    "background": "#171a17",
-    "panel": "#272c26",
-    "panel_light": "#30362e",
-    "green": "#3c8527",
-    "green_hover": "#4c9a31",
-    "text": "#f2f4ef",
-    "muted": "#a7afa3",
-    "line": "#3b4339",
-    "gold": "#f3ce68",
+    "background": "#1f1f1f",
+    "panel": "#2b2b2b",
+    "panel_light": "#383838",
+    "overlay": "#202020",
+    "accent": "#3c8527",
+    "accent_hover": "#4c9a31",
+    "accent_light": "#8bc34a",
+    "text": "#f2f2f2",
+    "muted": "#b5b5b5",
+    "line": "#4b4b4b",
+    "warning": "#f3ce68",
+    "success": "#7abf54",
+    "danger": "#e36c61",
     "disabled": "#777d77",
 }
 
@@ -110,6 +115,9 @@ class StodoLauncher:
     def __init__(self, root, current_version):
         self.root = root
         self.current_version = current_version
+        with Image.open(ROOT_DIR / "background.jpg") as background:
+            self._background_image = background.convert("RGB")
+        self._background_photo = None
         self.events = queue.Queue()
         self.process = None
         self.launching = False
@@ -136,11 +144,11 @@ class StodoLauncher:
         self._make_layout()
         self._sync_play_button()
         if self.update_checking:
-            self._set_status("Prüfe auf Launcher-Updates ...", COLORS["gold"])
+            self._set_status("Prüfe auf Launcher-Updates ...", COLORS["warning"])
         elif self.game_running:
             self._set_status("Minecraft läuft")
         elif self.game_status_error:
-            self._set_status("Spielstatus konnte nicht geprüft werden.", "#e36c61")
+            self._set_status("Spielstatus konnte nicht geprüft werden.", COLORS["danger"])
             self.root.after_idle(lambda: messagebox.showerror(
                 "Status konnte nicht geprüft werden",
                 "Der Minecraft-Status konnte nicht ermittelt werden. Der Start bleibt "
@@ -173,15 +181,24 @@ class StodoLauncher:
         style.configure(
             "Fabric.TCombobox", fieldbackground=COLORS["panel_light"],
             background=COLORS["panel_light"], foreground=COLORS["text"],
-            arrowcolor=COLORS["text"], bordercolor=COLORS["line"],
+            arrowcolor=COLORS["accent_light"], bordercolor=COLORS["line"],
             lightcolor=COLORS["line"], darkcolor=COLORS["line"],
-            padding=(8, 7),
+            padding=(10, 8), arrowsize=14,
         )
         style.map(
             "Fabric.TCombobox",
             fieldbackground=[("readonly", COLORS["panel_light"])],
             foreground=[("readonly", COLORS["text"])],
+            bordercolor=[("focus", COLORS["accent"])],
+            lightcolor=[("focus", COLORS["accent"])],
+            darkcolor=[("focus", COLORS["line"])],
+            arrowcolor=[("active", COLORS["accent_light"])],
         )
+        self.root.option_add("*TCombobox*Listbox.background", COLORS["panel"])
+        self.root.option_add("*TCombobox*Listbox.foreground", COLORS["text"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", COLORS["accent"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", COLORS["text"])
+        self.root.option_add("*TCombobox*Listbox.font", ("Segoe UI", 10))
         icon = ROOT_DIR / "launcher_icon.ico"
         if icon.exists():
             try:
@@ -252,21 +269,30 @@ class StodoLauncher:
         self.hero.grid_rowconfigure(0, weight=1)
         self.hero.grid_columnconfigure(0, weight=1)
         self.scene = tk.Canvas(
-            self.hero, bg="#405a55", highlightthickness=0, bd=0,
+            self.hero, bg=COLORS["panel"], highlightthickness=0, bd=0,
         )
         self.scene.grid(row=0, column=0, sticky="nsew")
-        self.scene.bind("<Configure>", self._draw_scene)
+        self.scene.bind("<Configure>", self._draw_background)
 
-        self.hero_copy = tk.Frame(self.scene, bg="#17201b")
+        self.hero_copy = tk.Frame(
+            self.scene, bg=COLORS["overlay"], highlightbackground=COLORS["line"],
+            highlightthickness=1,
+        )
         self.scene.create_window(28, 27, window=self.hero_copy, anchor="nw", tags="copy")
+        copy_header = tk.Frame(self.hero_copy, bg=COLORS["overlay"])
+        copy_header.pack(anchor="w", padx=18, pady=(15, 0))
+        tk.Frame(
+            copy_header, bg=COLORS["accent"], width=3, height=14,
+        ).pack(side="left", padx=(0, 8))
         tk.Label(
-            self.hero_copy, text="Info", fg="#c8eaa6",
-            bg="#17201b", font=("Segoe UI", 9, "bold"),
-        ).pack(anchor="w", padx=17, pady=(14, 3))
+            copy_header, text="SERVER MODPACK", fg=COLORS["accent_light"],
+            bg=COLORS["overlay"], font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
         tk.Label(
-            self.hero_copy, text="Es ist nur möglich\nmit den festgelegten Mods\nzu spielen.", fg="white",
-            bg="#17201b", justify="left", font=("Segoe UI", 24, "bold"),
-        ).pack(anchor="w", padx=17)
+            self.hero_copy, text="Es ist nur möglich\nmit den festgelegten Mods\nzu spielen.",
+            fg=COLORS["text"], bg=COLORS["overlay"], justify="left",
+            font=("Segoe UI", 17, "bold"),
+        ).pack(anchor="w", padx=18, pady=(9, 16))
 
         controls = tk.Frame(self.hero, bg=COLORS["panel"], height=94)
         controls.grid(row=1, column=0, sticky="ew")
@@ -290,7 +316,7 @@ class StodoLauncher:
         self.fabric_picker = ttk.Combobox(
             picker, textvariable=self.fabric_version, state="readonly",
             values=self.fabric_versions or ("Keine Fabric-Version gefunden",),
-            width=21, style="Fabric.TCombobox",
+            width=30, style="Fabric.TCombobox",
         )
         self.fabric_picker.pack(side="left")
         if self.fabric_versions:
@@ -304,8 +330,8 @@ class StodoLauncher:
             height=35, font=("Segoe UI", 11, "bold"),
         ).pack(side="left", padx=(6, 0), fill="y")
         self.play_button = self._button(
-            controls, "▶   PLAY", self._launch, bg=COLORS["green"],
-            hover=COLORS["green_hover"], height=52, width=20,
+            controls, "▶   PLAY", self._launch, bg=COLORS["accent"],
+            hover=COLORS["accent_hover"], height=52, width=20,
             font=("Segoe UI", 13, "bold"),
         )
         self.play_button.pack(side="right", padx=18, pady=18)
@@ -322,7 +348,7 @@ class StodoLauncher:
             footer, width=12, height=12, bg=COLORS["background"], highlightthickness=0,
         )
         self.status_dot.pack(side="left", padx=(25, 7), pady=15)
-        self.status_dot.create_oval(2, 2, 10, 10, fill="#7abf54", outline="")
+        self.status_dot.create_oval(2, 2, 10, 10, fill=COLORS["success"], outline="")
         self.status_label = tk.Label(
             footer, text=self.state, fg=COLORS["muted"], bg=COLORS["background"],
             font=("Segoe UI", 9),
@@ -334,14 +360,15 @@ class StodoLauncher:
         )
         self.version_label.pack(side="right", padx=(7, 25), pady=12)
 
-    def _button(self, parent, text, command, bg, hover, fg="white", height=40,
+    def _button(self, parent, text, command, bg, hover, fg=COLORS["text"], height=40,
                 width=None, font=("Segoe UI", 9, "bold")):
         button = tk.Button(
             parent, text=text, command=command, bg=bg, fg=fg,
             activebackground=hover, activeforeground=fg,
-            relief="flat", bd=0, cursor="hand2", height=1,
-            font=font, padx=14, pady=max(4, int((height - 18) / 2)),
-            highlightthickness=0,
+            relief="raised", bd=4, overrelief="raised", cursor="hand2", height=1,
+            font=font, padx=14, pady=max(2, int((height - 30) / 2)),
+            highlightthickness=2, highlightbackground=COLORS["overlay"],
+            highlightcolor=COLORS["overlay"],
         )
         if width:
             button.configure(width=width)
@@ -365,59 +392,29 @@ class StodoLauncher:
             x + mid, y + mid, x + size, y + mid / 2,
             x + size, y + size - mid / 2, x + mid, y + size,
         )
-        canvas.create_polygon(top, fill="#85cb55", outline="")
-        canvas.create_polygon(left, fill="#4a8f31", outline="")
-        canvas.create_polygon(right, fill="#326b27", outline="")
+        canvas.create_polygon(top, fill=COLORS["accent_light"], outline="")
+        canvas.create_polygon(left, fill=COLORS["accent_hover"], outline="")
+        canvas.create_polygon(right, fill=COLORS["accent"], outline="")
 
-    def _draw_scene(self, event):
+    def _draw_background(self, event):
         canvas = event.widget
         width, height = event.width, event.height
-        canvas.delete("scene")
-        if width < 10 or height < 10:
+        if width < 1 or height < 1:
             return
-        canvas.create_rectangle(0, 0, width, height, fill="#84b7c0", outline="", tags="scene")
-        canvas.create_rectangle(0, height * .48, width, height, fill="#6c984c", outline="", tags="scene")
-        canvas.create_rectangle(0, height * .68, width, height, fill="#547d3b", outline="", tags="scene")
-        canvas.create_oval(width * .72, height * .11, width * .83, height * .31,
-                           fill="#f3d982", outline="", tags="scene")
-        self._mountain(canvas, width * .43, height * .27, width * .65, height * .61, "#688d87")
-        self._mountain(canvas, width * .58, height * .22, width * .82, height * .61, "#597e77")
-        self._tree(canvas, width * .78, height * .52, height * .36)
-        self._tree(canvas, width * .91, height * .56, height * .31)
-        self._tree(canvas, width * .12, height * .55, height * .3)
-        self._tree(canvas, width * .27, height * .57, height * .25)
-        canvas.create_rectangle(width * .41, height * .7, width * .72, height * .74,
-                                fill="#91b774", outline="", tags="scene")
-        canvas.create_rectangle(width * .5, height * .74, width * .55, height * .79,
-                                fill="#78a75b", outline="", tags="scene")
+        fitted_image = ImageOps.fit(
+            self._background_image,
+            (width, height),
+            method=Image.Resampling.LANCZOS,
+        )
+        self._background_photo = ImageTk.PhotoImage(fitted_image, master=self.root)
+        canvas.delete("background")
+        canvas.create_image(
+            0, 0, image=self._background_photo, anchor="nw", tags="background",
+        )
+        canvas.tag_lower("background")
         canvas.tag_raise("copy")
 
-    def _mountain(self, canvas, x, y, right, bottom, color):
-        canvas.create_polygon(
-            x, bottom, (x + right) / 2, y, right, bottom,
-            fill=color, outline="", tags="scene",
-        )
-        canvas.create_polygon(
-            (x + right) / 2, y, x + (right - x) * .44, bottom * .61,
-            x + (right - x) * .6, bottom * .61, right, bottom,
-            fill="#799d91", outline="", tags="scene",
-        )
-
-    def _tree(self, canvas, center, ground, size):
-        trunk = max(6, size * .14)
-        canvas.create_rectangle(center - trunk / 2, ground - size * .35,
-                                center + trunk / 2, ground, fill="#624a32",
-                                outline="", tags="scene")
-        for offset, width, height in ((.05, .72, .47), (.23, 1, .48), (.41, .68, .47)):
-            top = ground - size * (offset + height)
-            canvas.create_rectangle(center - size * width / 2, top,
-                                    center + size * width / 2, top + size * .22,
-                                    fill="#315f3d", outline="", tags="scene")
-            canvas.create_rectangle(center - size * width * .38, top + size * .22,
-                                    center + size * width * .38, top + size * .38,
-                                    fill="#3c7545", outline="", tags="scene")
-
-    def _set_status(self, text, color="#7abf54"):
+    def _set_status(self, text, color=COLORS["success"]):
         self.state = text
         self.status_label.configure(text=text)
         self.status_dot.delete("all")
@@ -428,31 +425,31 @@ class StodoLauncher:
             self.play_button.configure(
                 state="disabled", text="SPIEL LÄUFT",
                 bg=COLORS["disabled"], activebackground=COLORS["disabled"],
-                disabledforeground="#e1e4e0", cursor="arrow",
+                disabledforeground=COLORS["text"], cursor="arrow",
             )
         elif self.launching or self.process is not None:
             self.play_button.configure(
                 state="disabled", text="WIRD GESTARTET ...",
                 bg=COLORS["disabled"], activebackground=COLORS["disabled"],
-                disabledforeground="#e1e4e0", cursor="arrow",
+                disabledforeground=COLORS["text"], cursor="arrow",
             )
         elif self.update_checking or self.pending_update is not None:
             self.play_button.configure(
                 state="disabled", text="UPDATE WIRD GEPRÜFT ...",
                 bg=COLORS["disabled"], activebackground=COLORS["disabled"],
-                disabledforeground="#e1e4e0", cursor="arrow",
+                disabledforeground=COLORS["text"], cursor="arrow",
             )
         elif self.game_status_error or not self.fabric_versions:
             self.play_button.configure(
                 state="disabled", text="▶   SPIELEN",
                 bg=COLORS["disabled"], activebackground=COLORS["disabled"],
-                disabledforeground="#e1e4e0", cursor="arrow",
+                disabledforeground=COLORS["text"], cursor="arrow",
             )
         else:
             self.play_button.configure(
                 state="normal", text="▶   SPIELEN",
-                bg=COLORS["green"], activebackground=COLORS["green_hover"],
-                disabledforeground="#e1e4e0", cursor="hand2",
+                bg=COLORS["accent"], activebackground=COLORS["accent_hover"],
+                disabledforeground=COLORS["text"], cursor="hand2",
             )
 
     def _read_backend_status(self):
@@ -462,7 +459,7 @@ class StodoLauncher:
             return
         if status and status != self.last_backend_status:
             self.last_backend_status = status
-            self._set_status(status, COLORS["gold"])
+            self._set_status(status, COLORS["warning"])
 
     def _refresh_game_state(self):
         if os.name != "nt":
@@ -473,7 +470,7 @@ class StodoLauncher:
             if not self.game_status_error:
                 self.game_status_error = True
                 self._sync_play_button()
-                self._set_status("Spielstatus konnte nicht geprüft werden.", "#e36c61")
+                self._set_status("Spielstatus konnte nicht geprüft werden.", COLORS["danger"])
                 messagebox.showerror(
                     "Status konnte nicht geprüft werden",
                     "Der Minecraft-Status konnte nicht ermittelt werden. Der Start bleibt "
@@ -544,14 +541,14 @@ class StodoLauncher:
             except FileNotFoundError:
                 pass
             self._sync_play_button()
-            self._set_status(str(error), "#e36c61")
+            self._set_status(str(error), COLORS["danger"])
             messagebox.showerror("Launcher-Update", str(error), parent=self.root)
             return
 
         self.update_replacement_scheduled = True
         self._set_status(
             f"Launcher-Version {version} wird installiert. Der Launcher startet neu ...",
-            COLORS["gold"],
+            COLORS["warning"],
         )
         self._close()
 
@@ -578,7 +575,7 @@ class StodoLauncher:
         self.status_file.write_text("", encoding="utf-8")
         self._sync_play_button()
         self.fabric_picker.configure(state="disabled")
-        self._set_status("Launcher wird vorbereitet ...", COLORS["gold"])
+        self._set_status("Launcher wird vorbereitet ...", COLORS["warning"])
         threading.Thread(target=self._run_launcher, args=(command,), daemon=True).start()
 
     def _refresh_fabric_versions(self):
@@ -608,7 +605,7 @@ class StodoLauncher:
             self.fabric_picker.configure(state="disabled")
             self._sync_play_button()
             if not self.game_running and not self.launching and self.process is None:
-                self._set_status("Fabric installieren, um zu spielen", "#e3b94f")
+                self._set_status("Fabric installieren, um zu spielen", COLORS["warning"])
 
     def _run_launcher(self, command):
         try:
@@ -635,7 +632,7 @@ class StodoLauncher:
                 self.process = value
                 self.launching = False
                 self._sync_play_button()
-                self._set_status("Minecraft wird vorbereitet ...", COLORS["gold"])
+                self._set_status("Minecraft wird vorbereitet ...", COLORS["warning"])
             elif kind == "exited":
                 self.process = None
                 self.launching = False
@@ -647,7 +644,7 @@ class StodoLauncher:
                     if not self.game_running:
                         self._set_status("Bereit zum Spielen")
                 else:
-                    self._set_status("Beim Start ist ein Fehler aufgetreten.", "#e36c61")
+                    self._set_status("Beim Start ist ein Fehler aufgetreten.", COLORS["danger"])
                     messagebox.showerror(
                         "Startfehler",
                         "Minecraft konnte nicht gestartet werden. Bitte versuche es erneut.",
@@ -660,10 +657,10 @@ class StodoLauncher:
                 self.fabric_picker.configure(
                     state="readonly" if self.fabric_versions else "disabled",
                 )
-                self._set_status("Launcher konnte nicht gestartet werden.", "#e36c61")
+                self._set_status("Launcher konnte nicht gestartet werden.", COLORS["danger"])
                 messagebox.showerror("Startfehler", value, parent=self.root)
             elif kind == "update_status":
-                self._set_status(value, COLORS["gold"])
+                self._set_status(value, COLORS["warning"])
             elif kind == "update_current":
                 self.update_checking = False
                 self._sync_play_button()
@@ -672,7 +669,7 @@ class StodoLauncher:
             elif kind == "update_error":
                 self.update_checking = False
                 self._sync_play_button()
-                self._set_status(value, "#e3b94f")
+                self._set_status(value, COLORS["warning"])
             elif kind == "update_ready":
                 self.update_checking = False
                 self.pending_update = value
@@ -680,10 +677,10 @@ class StodoLauncher:
                 if self.game_running:
                     self._set_status(
                         "Update bereit. Es wird nach dem Schließen von Minecraft installiert.",
-                        COLORS["gold"],
+                        COLORS["warning"],
                     )
                 else:
-                    self._set_status("Update wird vorbereitet ...", COLORS["gold"])
+                    self._set_status("Update wird vorbereitet ...", COLORS["warning"])
 
         self._read_backend_status()
         self._refresh_game_state()

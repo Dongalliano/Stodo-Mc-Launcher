@@ -245,6 +245,25 @@ class LauncherTests(unittest.TestCase):
             pady=12,
         )
 
+    def test_background_image_fills_canvas_and_stays_behind_copy(self):
+        launcher = object.__new__(gui.StodoLauncher)
+        launcher.root = Mock()
+        launcher._background_image = gui.Image.new("RGB", (117, 50))
+        canvas = Mock()
+        event = Mock(widget=canvas, width=200, height=100)
+        photo = Mock()
+
+        with patch.object(gui.ImageTk, "PhotoImage", return_value=photo) as photo_image:
+            launcher._draw_background(event)
+
+        self.assertEqual(photo_image.call_args.args[0].size, (200, 100))
+        canvas.delete.assert_called_once_with("background")
+        canvas.create_image.assert_called_once_with(
+            0, 0, image=photo, anchor="nw", tags="background",
+        )
+        canvas.tag_lower.assert_called_once_with("background")
+        canvas.tag_raise.assert_called_once_with("copy")
+
     @unittest.skipUnless(os.name == "nt", "Windows mutex behavior")
     def test_game_mutex_is_detected_and_prevents_a_second_launch(self):
         mutex_name = "Local\\StodoMcLauncherTest_" + uuid.uuid4().hex

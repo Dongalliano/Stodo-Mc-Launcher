@@ -11,6 +11,7 @@ $ExeName  = "StodoMcLauncher"
 $EntryScript = Join-Path $Root "main.py"
 $SourceDir = Join-Path $Root "src"
 $JsDir    = Join-Path $Root "src\js"
+$BackgroundImage = Join-Path $Root "background.jpg"
 $PackageDir = Join-Path $SourceDir "stodo_launcher"
 $ZipPath  = Join-Path $Root "$ExeName.zip"
 $IconPng  = Join-Path $Root "launcher_icon.png"
@@ -36,6 +37,7 @@ $required = @(
     (Join-Path $PackageDir "gui.py"),
     (Join-Path $PackageDir "mod_installer.py"),
     (Join-Path $PackageDir "updater.py"),
+    $BackgroundImage,
     (Join-Path $JsDir "login.js"),
     (Join-Path $JsDir "package.json"),
     (Join-Path $JsDir "package-lock.json")
@@ -104,6 +106,7 @@ canvas.save(dst, format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (48, 48)
         "--add-data", "$(Join-Path $JsDir 'login.js');src/js",
         "--add-data", "$(Join-Path $JsDir 'package.json');src/js",
         "--add-data", "$(Join-Path $JsDir 'package-lock.json');src/js",
+        "--add-data", "$BackgroundImage;.",
         "--hidden-import", "stodo_launcher.backend",
         "--hidden-import", "stodo_launcher.mod_installer",
         "--collect-all", "minecraft_launcher_lib"

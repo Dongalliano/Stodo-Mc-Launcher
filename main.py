@@ -1,23 +1,101 @@
+import ctypes
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
 import minecraft_launcher_lib as mll
 
+# ---------- Where things live ----------
+
+FROZEN = getattr(sys, "frozen", False)   # True when running as the built .exe
+
+if FROZEN:
+    # Resources are bundled in the exe; everything we create goes to LOCALAPPDATA
+    RES_DIR = Path(sys._MEIPASS)
+    APP_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "StodoMcLauncher"
+else:
+    RES_DIR = Path(__file__).parent
+    APP_DIR = Path(__file__).parent
+
+APP_DIR.mkdir(parents=True, exist_ok=True)
+
+SRC_PATH = APP_DIR / "src"
+JS_PATH = SRC_PATH / "js"
+PY_PATH = SRC_PATH / "py"
+LOGIN_JS = JS_PATH / "login.js"
+
+
+# ---------- No-console mode (main.pyw / pythonw / exe built with --noconsole) ----------
+
+def _has_console():
+    if os.name != "nt":
+        return sys.stdout is not None
+    return bool(ctypes.windll.kernel32.GetConsoleWindow())
+
+
+HEADLESS = sys.stdout is None or sys.stderr is None or not _has_console()
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if HEADLESS else 0
+
+if HEADLESS:
+    # Nothing to print to, so everything goes to a log file
+    try:
+        _log = open(APP_DIR / "launcher.log", "w", encoding="utf-8", buffering=1)
+    except OSError:
+        _log = open(Path(tempfile.gettempdir()) / "stodo_launcher.log", "w", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stderr = _log
+
+
+def run(cmd, **kwargs):
+    """subprocess.run that also works without a console window."""
+    if HEADLESS:
+        kwargs.setdefault("stdin", subprocess.DEVNULL)
+        kwargs.setdefault("stdout", sys.stdout)
+        kwargs.setdefault("stderr", sys.stderr)
+        kwargs.setdefault("creationflags", NO_WINDOW)
+    return subprocess.run(cmd, **kwargs)
+
+
+def show_error(msg):
+    try:
+        ctypes.windll.user32.MessageBoxW(0, str(msg), "Stodo Mc Launcher", 0x10)
+    except Exception:
+        pass
+
+
+_mutex = None
+
+
+def acquire_single_instance():
+    """Only one launcher at a time, otherwise two mod swaps would collide."""
+    global _mutex
+    if os.name != "nt":
+        return True
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _mutex = kernel32.CreateMutexW(None, False, "Local\\StodoMcLauncher")
+    return ctypes.get_last_error() != 183   # 183 = ERROR_ALREADY_EXISTS
+
+
+def sync_resources():
+    """In the exe: copy login.js and the package files out of it so Node can use them."""
+    if not FROZEN:
+        return
+    JS_PATH.mkdir(parents=True, exist_ok=True)
+    for name in ("login.js", "package.json", "package-lock.json"):
+        src = RES_DIR / "src" / "js" / name
+        if src.exists():
+            shutil.copy2(src, JS_PATH / name)
+
+
 # ---- Configuration ----
 SERVER_JSON_URL = "https://raw.githubusercontent.com/Dongalliano/Stodo-Mc-Launcher/main/server.json"
 # -----------------------
 
-SCRIPT_PATH = Path(__file__).parent
-SRC_PATH = SCRIPT_PATH / "src"
-JS_PATH = SRC_PATH / "js"
-PY_PATH = SRC_PATH / "py"
-LOGIN_JS = JS_PATH / "login.js"
 MC_DIR = Path(mll.utils.get_minecraft_directory())
 
 MODS_DIR = MC_DIR / "mods"
@@ -25,8 +103,10 @@ BACKUP_DIR = MC_DIR / "mods_backup_stodo"   # temporary home of your own mods
 BACKUP_MODS = BACKUP_DIR / "mods"
 MANIFEST = BACKUP_DIR / "manifest.json"
 
-sys.path.insert(0, str(PY_PATH))
+if not FROZEN:
+    sys.path.insert(0, str(PY_PATH))
 from install_mods import install_mods  # noqa: E402
+
 
 # ---------- server.json (read straight from GitHub) ----------
 
@@ -159,7 +239,7 @@ def ensure_node():
     if not shutil.which("winget"):
         sys.exit("winget is not available. Install Node.js (LTS) manually from https://nodejs.org and run this again.")
 
-    subprocess.run([
+    run([
         "winget", "install", "OpenJS.NodeJS.LTS",
         "--silent", "--accept-package-agreements", "--accept-source-agreements",
     ])
@@ -183,9 +263,9 @@ def ensure_packages(node, env):
     print("Installing prismarine-auth...")
     npm = node.parent / "npm.cmd"
     npm_cmd = str(npm) if npm.exists() else (shutil.which("npm.cmd") or "npm.cmd")
-    result = subprocess.run([npm_cmd, "install", "prismarine-auth"], cwd=JS_PATH, env=env)
+    result = run([npm_cmd, "install", "prismarine-auth"], cwd=JS_PATH, env=env)
     if result.returncode != 0:
-        sys.exit("Installing prismarine-auth failed, see the message above.")
+        sys.exit("Installing prismarine-auth failed, see launcher.log for details.")
 
 
 # ---------- Fabric ----------
@@ -227,13 +307,13 @@ def get_game_version(fabric_id):
 # ---------- Login ----------
 
 def get_login(node, env):
-    # stderr is not captured, so the sign-in code is shown in the console
-    result = subprocess.run(
+    # The sign-in code goes to stderr (shown in the console, or written to launcher.log)
+    result = run(
         [str(node), str(LOGIN_JS)],
         stdout=subprocess.PIPE, text=True, cwd=JS_PATH, env=env,
     )
     if result.returncode != 0:
-        sys.exit("Login failed, see the message above.")
+        sys.exit("Login failed, see launcher.log for details.")
 
     lines = [l for l in result.stdout.splitlines() if l.strip()]
     try:
@@ -246,6 +326,10 @@ def get_login(node, env):
 # ---------- Main ----------
 
 def main():
+    if not acquire_single_instance():
+        sys.exit("The launcher is already running.")
+
+    sync_resources()
     if not LOGIN_JS.exists():
         sys.exit(f"{LOGIN_JS} not found.")
 
@@ -308,7 +392,8 @@ def main():
                 print("Warning: some mods could not be installed, starting anyway.")
 
         print("Starting Minecraft...")
-        subprocess.run(cmd, cwd=MC_DIR)   # returns when the game is closed
+        # returns when the game is closed; the game's own log is in .minecraft/logs/latest.log
+        run(cmd, cwd=MC_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     finally:
         # 3. Delete the installed mods, 4. move your own mods back
         if swapped:
@@ -317,4 +402,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit as e:
+        if HEADLESS and e.code not in (None, 0):
+            show_error(e.code)
+        raise
+    except Exception as e:
+        if HEADLESS:
+            show_error(repr(e))
+        raise

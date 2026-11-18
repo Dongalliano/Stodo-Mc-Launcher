@@ -1,9 +1,11 @@
+import ctypes
 import json
 import os
 import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.request
@@ -147,6 +149,7 @@ try {
         Start-Sleep -Milliseconds 250
     }
     try {
+        $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
         Move-Item -LiteralPath $StagedPath -Destination $TargetPath -Force
         Start-Process -FilePath $TargetPath -WorkingDirectory (Split-Path -Parent $TargetPath)
     }
@@ -169,6 +172,15 @@ finally {
 """
 
 
+def _replacement_environment():
+    environment = os.environ.copy()
+    for name in tuple(environment):
+        if name.upper().startswith(("_PYI_", "PYINSTALLER_")):
+            environment.pop(name)
+    environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return environment
+
+
 def schedule_replacement(staged_path, executable_path):
     script_descriptor = None
     script_path = None
@@ -186,25 +198,42 @@ def schedule_replacement(staged_path, executable_path):
         powershell = shutil.which("powershell.exe")
         if not powershell:
             raise UpdateError("PowerShell wurde nicht gefunden; das Update kann nicht installiert werden.")
-        subprocess.Popen(
-            [
-                powershell,
-                "-NoProfile",
-                "-NonInteractive",
-                "-WindowStyle",
-                "Hidden",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(script_path),
-                str(staged_path),
-                str(executable_path),
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        command = [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script_path),
+            str(staged_path),
+            str(executable_path),
+        ]
+        environment = _replacement_environment()
+        kernel32 = None
+        dll_directory = None
+        if os.name == "nt" and getattr(sys, "frozen", False):
+            dll_directory = str(getattr(sys, "_MEIPASS"))
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.SetDllDirectoryW.argtypes = [ctypes.c_wchar_p]
+            kernel32.SetDllDirectoryW.restype = ctypes.c_int
+            if not kernel32.SetDllDirectoryW(None):
+                raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                env=environment,
+            )
+        except OSError as error:
+            if kernel32 and not kernel32.SetDllDirectoryW(dll_directory):
+                raise ctypes.WinError(ctypes.get_last_error()) from error
+            raise
         launched = True
     except OSError as error:
         raise UpdateError("Der Launcher konnte das Update nicht vorbereiten.") from error

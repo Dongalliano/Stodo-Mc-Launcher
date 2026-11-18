@@ -122,11 +122,27 @@ class LauncherTests(unittest.TestCase):
 
             self.assertEqual(list(Path(temp_dir).iterdir()), [])
 
+    def test_updater_environment_clears_stale_pyinstaller_state(self):
+        with patch.dict(
+            os.environ,
+            {
+                "_PYI_APPLICATION_HOME_DIR": "C:\\old-extraction",
+                "PYINSTALLER_STRICT_UNPACK_MODE": "1",
+            },
+        ):
+            environment = updater._replacement_environment()
+
+        self.assertNotIn("_PYI_APPLICATION_HOME_DIR", environment)
+        self.assertNotIn("PYINSTALLER_STRICT_UNPACK_MODE", environment)
+        self.assertEqual(environment["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+
     def test_updater_schedules_a_unicode_powershell_helper(self):
         command = []
+        launch_options = {}
 
         def capture_command(arguments, **kwargs):
             command.extend(arguments)
+            launch_options.update(kwargs)
 
         with patch.object(updater.shutil, "which", return_value="powershell.exe"), patch.object(
             updater.subprocess, "Popen", side_effect=capture_command,
@@ -140,9 +156,39 @@ class LauncherTests(unittest.TestCase):
         try:
             script = script_path.read_text(encoding="utf-8-sig")
             self.assertIn("Move-Item -LiteralPath", script)
+            self.assertIn("$env:PYINSTALLER_RESET_ENVIRONMENT = '1'", script)
             self.assertIn("Schreibrechte", script)
+            self.assertEqual(
+                launch_options["env"]["PYINSTALLER_RESET_ENVIRONMENT"],
+                "1",
+            )
         finally:
             script_path.unlink()
+
+    @unittest.skipUnless(os.name == "nt", "Windows-only updater process behavior")
+    def test_frozen_updater_clears_the_pyinstaller_dll_directory(self):
+        command = []
+
+        def capture_command(arguments, **kwargs):
+            command.extend(arguments)
+
+        kernel32 = Mock()
+        with patch.object(updater.sys, "frozen", True, create=True), patch.object(
+            updater.sys, "_MEIPASS", "C:\\old-extraction", create=True,
+        ), patch.object(
+            updater.ctypes, "WinDLL", return_value=kernel32,
+        ), patch.object(
+            updater.shutil, "which", return_value="powershell.exe",
+        ), patch.object(
+            updater.subprocess, "Popen", side_effect=capture_command,
+        ):
+            updater.schedule_replacement(
+                Path("StodoMcLauncher.update.exe"),
+                Path("StodoMcLauncher.exe"),
+            )
+
+        kernel32.SetDllDirectoryW.assert_called_once_with(None)
+        Path(command[command.index("-File") + 1]).unlink()
 
     def test_backend_status_updates_the_temporary_status_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

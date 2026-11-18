@@ -1,0 +1,24 @@
+# Login tokens: never commit these
+auth-cache/
+
+# Node dependencies (restored with npm install)
+node_modules/
+
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor
+.vscode/
+
+# Leftovers from game runs
+logs/
+crash-reports/
+config/

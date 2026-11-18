@@ -13,7 +13,8 @@ SERVER = "donutsmp.net"
 
 SCRIPT_PATH = Path(__file__).parent
 SRC_PATH = SCRIPT_PATH / "src"
-LOGIN_JS = SRC_PATH / "login.js"
+JS_PATH = SRC_PATH / "js"
+LOGIN_JS = JS_PATH / "login.js"
 MC_DIR = mll.utils.get_minecraft_directory()
 
 
@@ -61,12 +62,12 @@ def node_env(node):
 
 
 def ensure_packages(node, env):
-    if (SRC_PATH / "node_modules" / "prismarine-auth").exists():
+    if (JS_PATH / "node_modules" / "prismarine-auth").exists():
         return
     print("Installing prismarine-auth...")
     npm = node.parent / "npm.cmd"
     npm_cmd = str(npm) if npm.exists() else (shutil.which("npm.cmd") or "npm.cmd")
-    result = subprocess.run([npm_cmd, "install", "prismarine-auth"], cwd=SRC_PATH, env=env)
+    result = subprocess.run([npm_cmd, "install", "prismarine-auth"], cwd=JS_PATH, env=env)
     if result.returncode != 0:
         sys.exit("Installing prismarine-auth failed, see the message above.")
 
@@ -98,7 +99,7 @@ def get_login(node, env):
     # stderr is not captured, so the sign-in code is shown in the console
     result = subprocess.run(
         [str(node), str(LOGIN_JS)],
-        stdout=subprocess.PIPE, text=True, cwd=SRC_PATH, env=env,
+        stdout=subprocess.PIPE, text=True, cwd=JS_PATH, env=env,
     )
     if result.returncode != 0:
         sys.exit("Login failed, see the message above.")
@@ -149,6 +150,8 @@ def main():
             options["executablePath"] = mll.runtime.get_executable_path(info["name"], MC_DIR)
     except Exception as e:
         print("Using system Java:", e)
+        
+    print("Installing Mods")
 
     cmd = mll.command.get_minecraft_command(version, MC_DIR, options)
     print("Starting Minecraft...")

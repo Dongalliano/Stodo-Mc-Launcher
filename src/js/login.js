@@ -43,7 +43,10 @@ const flow = new Authflow(
 
 flow.getMinecraftJavaToken({ fetchProfile: true })
   .then((r) => {
-    if (!r.profile || !r.profile.id) throw new Error('No Minecraft profile (does the account own Java Edition?)')
+    if (!r.profile || !r.profile.id) throw new Error('Mit diesem Microsoft-Konto ist kein Minecraft-Java-Profil verknüpft.')
     process.stdout.write(JSON.stringify({ name: r.profile.name, id: r.profile.id, token: r.token }))
   })
-  .catch((e) => { console.error('Login failed:', e.message || e); process.exit(1) })
+  .catch(() => {
+    console.error('Die Anmeldung ist fehlgeschlagen. Prüfe dein Microsoft-Konto und versuche es erneut.')
+    process.exit(1)
+  })

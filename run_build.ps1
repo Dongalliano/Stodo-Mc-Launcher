@@ -8,9 +8,10 @@ $ErrorActionPreference = "Stop"
 $Root     = $PSScriptRoot
 $BuildDir = Join-Path $Root "build"
 $ExeName  = "StodoMcLauncher"
-$GuiScript = Join-Path $Root "launcher_gui.py"
+$EntryScript = Join-Path $Root "main.py"
+$SourceDir = Join-Path $Root "src"
 $JsDir    = Join-Path $Root "src\js"
-$PyDir    = Join-Path $Root "src\py"
+$PackageDir = Join-Path $SourceDir "stodo_launcher"
 $ZipPath  = Join-Path $Root "$ExeName.zip"
 $IconPng  = Join-Path $Root "launcher_icon.png"
 $IconIcoSrc = Join-Path $Root "launcher_icon.ico"   # optional: a ready-made .ico is used as it is
@@ -18,39 +19,32 @@ $IconIcoSrc = Join-Path $Root "launcher_icon.ico"   # optional: a ready-made .ic
 # PyInstaller's temporary files go to a temp folder, so "build" only ever contains finished files
 $WorkDir  = Join-Path ([System.IO.Path]::GetTempPath()) ("stodo-build-" + [guid]::NewGuid().ToString("N"))
 
-# Use main.pyw if it exists, otherwise main.py
-$MainScript = Join-Path $Root "main.pyw"
-if (-not (Test-Path $MainScript)) { $MainScript = Join-Path $Root "main.py" }
-
 function Run-Py {
     & py @args
-    if ($LASTEXITCODE -ne 0) { throw "Command failed: py $($args -join ' ')" }
+    if ($LASTEXITCODE -ne 0) { throw "Befehl fehlgeschlagen: py $($args -join ' ')" }
 }
 
 # ---- Checks ----
 if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
-    throw "Python launcher 'py' not found. Install Python from python.org and tick 'Add to PATH'."
+    throw "Der Python-Launcher 'py' wurde nicht gefunden. Installiere Python von python.org und aktiviere 'Add to PATH'."
 }
 
 $required = @(
-    $MainScript,
-    $GuiScript,
+    $EntryScript,
+    (Join-Path $PackageDir "__init__.py"),
+    (Join-Path $PackageDir "backend.py"),
+    (Join-Path $PackageDir "gui.py"),
+    (Join-Path $PackageDir "mod_installer.py"),
     (Join-Path $JsDir "login.js"),
     (Join-Path $JsDir "package.json"),
-    (Join-Path $JsDir "package-lock.json"),
-    (Join-Path $PyDir "install_mods.py")
+    (Join-Path $JsDir "package-lock.json")
 )
 foreach ($f in $required) {
-    if (-not (Test-Path $f)) { throw "Missing file: $f" }
-}
-
-# The exe needs the exe-ready version of the script (it looks for its files inside the exe)
-if (-not (Select-String -Path $MainScript -Pattern "FROZEN" -SimpleMatch -Quiet)) {
-    throw "$(Split-Path $MainScript -Leaf) is not the exe-ready version (no FROZEN handling). Update the script first."
+    if (-not (Test-Path $f)) { throw "Datei fehlt: $f" }
 }
 
 if (Get-Process -Name $ExeName -ErrorAction SilentlyContinue) {
-    throw "$ExeName.exe is running. Close it first, then build again."
+    throw "$ExeName.exe läuft bereits. Schließe den Launcher und starte den Build erneut."
 }
 
 # ---- Dependencies ----
@@ -92,7 +86,7 @@ canvas.save(dst, format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (48, 48)
 '@ | Set-Content -Path $converter -Encoding ASCII
         Run-Py $converter $IconPng $Icon
 
-        if (-not (Test-Path $Icon)) { throw "Icon conversion failed: $Icon was not created." }
+        if (-not (Test-Path $Icon)) { throw "Die Symbol-Konvertierung ist fehlgeschlagen: $Icon wurde nicht erstellt." }
         Write-Host "Icon created: $Icon ($([math]::Round((Get-Item $Icon).Length / 1KB, 1)) KB)"
     }
     else {
@@ -105,12 +99,12 @@ canvas.save(dst, format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (48, 48)
         "--noconfirm", "--clean", "--onefile",
         "--distpath", $BuildDir,
         "--specpath", $WorkDir,
-        "--paths", $PyDir,
+        "--paths", $SourceDir,
         "--add-data", "$(Join-Path $JsDir 'login.js');src/js",
         "--add-data", "$(Join-Path $JsDir 'package.json');src/js",
         "--add-data", "$(Join-Path $JsDir 'package-lock.json');src/js",
-        "--add-data", "$MainScript;.",
-        "--hidden-import", "install_mods",
+        "--hidden-import", "stodo_launcher.backend",
+        "--hidden-import", "stodo_launcher.mod_installer",
         "--collect-all", "minecraft_launcher_lib"
     )
     if ($Icon) {
@@ -125,13 +119,13 @@ canvas.save(dst, format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (48, 48)
         "--workpath", $WorkDir,
         "--noconsole",
         "--name", $ExeName,
-        $GuiScript
+        $EntryScript
     )
-    Write-Host "Building $ExeName.exe from $(Split-Path $GuiScript -Leaf)..."
+    Write-Host "Building $ExeName.exe from $(Split-Path $EntryScript -Leaf)..."
     Run-Py @pyArgs
 
     $exe = Join-Path $BuildDir "$ExeName.exe"
-    if (-not (Test-Path $exe)) { throw "Build finished but $exe was not created." }
+    if (-not (Test-Path $exe)) { throw "Der Build wurde beendet, aber $exe wurde nicht erstellt." }
 
     # ---- Check that the icon is really inside the exe (reads the file itself, not Explorer's cache) ----
     if ($Icon) {
@@ -146,12 +140,12 @@ canvas.save(dst, format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (48, 48)
                 Write-Host "OK: the custom icon is embedded in the exe." -ForegroundColor Green
             }
             else {
-                Write-Host "WARNING: the exe may still contain the default PyInstaller icon." -ForegroundColor Yellow
-                Write-Host "(This check assumes a green icon; ignore it if your icon is not green.)" -ForegroundColor Yellow
+                Write-Host "WARNUNG: Die EXE enthält möglicherweise noch das PyInstaller-Standardsymbol." -ForegroundColor Yellow
+                Write-Host "(Diese Prüfung erwartet ein grünes Symbol; bei anderen Farben kannst du die Warnung ignorieren.)" -ForegroundColor Yellow
             }
         }
         catch {
-            Write-Host "Could not verify the icon automatically (not critical)." -ForegroundColor Yellow
+            Write-Host "Das Symbol konnte nicht automatisch überprüft werden (nicht kritisch)." -ForegroundColor Yellow
         }
 
         # ---- Refresh the Windows icon cache so Explorer shows the new icon ----
@@ -162,7 +156,7 @@ canvas.save(dst, format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (48, 48)
             Write-Host "Icon cache refreshed. If Explorer still shows the old icon, restart Explorer or sign out and in." -ForegroundColor Cyan
         }
         catch {
-            Write-Host "Could not refresh the icon cache automatically (not critical)." -ForegroundColor Yellow
+            Write-Host "Der Symbolcache konnte nicht automatisch aktualisiert werden (nicht kritisch)." -ForegroundColor Yellow
         }
     }
 

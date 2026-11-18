@@ -1,0 +1,1 @@
+"""Stodo Minecraft launcher package."""

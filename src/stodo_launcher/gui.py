@@ -1,6 +1,5 @@
 import os
 import queue
-import runpy
 import subprocess
 import sys
 import threading
@@ -11,13 +10,11 @@ from tkinter import messagebox, ttk
 import minecraft_launcher_lib as mll
 
 
-ROOT_DIR = Path(__file__).resolve().parent
-APP_DIR = (
-    Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "StodoMcLauncher"
+ROOT_DIR = (
+    Path(getattr(sys, "_MEIPASS"))
     if getattr(sys, "frozen", False)
-    else ROOT_DIR
+    else Path(__file__).resolve().parents[2]
 )
-LOG_FILE = APP_DIR / "launcher.log"
 
 COLORS = {
     "background": "#171a17",
@@ -53,15 +50,24 @@ def launch_command(fabric_version):
     if getattr(sys, "frozen", False):
         return [sys.executable, "--backend", "--fabric-version", fabric_version]
 
-    main_script = ROOT_DIR / "main.pyw"
-    if not main_script.exists():
-        main_script = ROOT_DIR / "main.py"
-    if main_script.exists():
-        return [sys.executable, str(main_script), "--fabric-version", fabric_version]
+    launcher_script = ROOT_DIR / "main.py"
+    if launcher_script.exists():
+        return [
+            sys.executable,
+            str(launcher_script),
+            "--backend",
+            "--fabric-version",
+            fabric_version,
+        ]
+    raise FileNotFoundError("Die Startdatei main.py wurde nicht gefunden.")
 
-    raise FileNotFoundError(
-        "Could not find main.py or main.pyw beside the launcher."
-    )
+
+def _backend_process_environment():
+    if not getattr(sys, "frozen", False):
+        return None
+    environment = os.environ.copy()
+    environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return environment
 
 
 class StodoLauncher:
@@ -69,14 +75,22 @@ class StodoLauncher:
         self.root = root
         self.events = queue.Queue()
         self.process = None
-        self.log_position = 0
-        self.log_mtime = None
-        self.log_active = False
-        self.state = "Ready to play"
-        self.fabric_versions = get_installed_fabric_versions()
+        self.state = "Bereit zum Spielen"
+        try:
+            self.fabric_versions = get_installed_fabric_versions()
+            self.fabric_versions_error = False
+        except Exception:
+            self.fabric_versions = []
+            self.fabric_versions_error = True
         self.fabric_version = tk.StringVar()
         self._make_window()
         self._make_layout()
+        if self.fabric_versions_error:
+            self.root.after_idle(lambda: messagebox.showerror(
+                "Fehler beim Laden",
+                "Die installierten Fabric-Versionen konnten nicht ermittelt werden.",
+                parent=self.root,
+            ))
         self.root.after(350, self._poll)
 
     def _make_window(self):
@@ -205,14 +219,14 @@ class StodoLauncher:
         ).pack(anchor="w", pady=(0, 5))
         self.fabric_picker = ttk.Combobox(
             picker, textvariable=self.fabric_version, state="readonly",
-            values=self.fabric_versions or ("No Fabric versions found",),
+            values=self.fabric_versions or ("Keine Fabric-Version gefunden",),
             width=21, style="Fabric.TCombobox",
         )
         self.fabric_picker.pack(side="left")
         if self.fabric_versions:
             self.fabric_picker.current(0)
         else:
-            self.fabric_version.set("No Fabric versions found")
+            self.fabric_version.set("Keine Fabric-Version gefunden")
             self.fabric_picker.configure(state="disabled")
         self._button(
             picker, "↻", self._refresh_fabric_versions,
@@ -227,7 +241,7 @@ class StodoLauncher:
         self.play_button.pack(side="right", padx=18, pady=18)
         if not self.fabric_versions:
             self.play_button.configure(state="disabled")
-            self.state = "Install Fabric to play"
+            self.state = "Fabric installieren, um zu spielen"
 
     def _make_footer(self):
         footer = tk.Frame(self.content, bg=COLORS["background"], height=45)
@@ -256,8 +270,8 @@ class StodoLauncher:
         )
         if width:
             button.configure(width=width)
-        button.bind("<Enter>", lambda _event: button.configure(bg=hover))
-        button.bind("<Leave>", lambda _event: button.configure(bg=bg))
+        button.bind("<Enter>", lambda event: event.widget.configure(bg=hover))
+        button.bind("<Leave>", lambda event: event.widget.configure(bg=bg))
         return button
 
     def _draw_cube(self, canvas, x, y, size):
@@ -332,30 +346,32 @@ class StodoLauncher:
         try:
             selected_version = self.fabric_version.get()
             if selected_version not in self.fabric_versions:
-                raise ValueError("Install a Fabric profile before launching the game.")
+                raise ValueError("Installiere zuerst ein Fabric-Profil.")
             command = launch_command(selected_version)
-            APP_DIR.mkdir(parents=True, exist_ok=True)
         except (FileNotFoundError, OSError, ValueError) as error:
-            messagebox.showerror("Could not start launcher", str(error), parent=self.root)
+            message = str(error) if isinstance(error, (FileNotFoundError, ValueError)) else \
+                "Der Launcherprozess konnte nicht gestartet werden."
+            messagebox.showerror("Startfehler", message, parent=self.root)
             return
 
-        self.play_button.configure(state="disabled", text="STARTING...")
+        self.play_button.configure(state="disabled", text="WIRD GESTARTET ...")
         self.fabric_picker.configure(state="disabled")
-        self._set_status("Starting launcher...", COLORS["gold"])
-        try:
-            self.log_position = LOG_FILE.stat().st_size
-            self.log_mtime = LOG_FILE.stat().st_mtime_ns
-        except OSError:
-            self.log_position = 0
-            self.log_mtime = -1
-        self.log_active = False
+        self._set_status("Launcher wird vorbereitet ...", COLORS["gold"])
         threading.Thread(target=self._run_launcher, args=(command,), daemon=True).start()
 
     def _refresh_fabric_versions(self):
         selected = self.fabric_version.get()
-        self.fabric_versions = get_installed_fabric_versions()
+        try:
+            self.fabric_versions = get_installed_fabric_versions()
+        except Exception:
+            messagebox.showerror(
+                "Fehler beim Aktualisieren",
+                "Die installierten Fabric-Versionen konnten nicht geladen werden.",
+                parent=self.root,
+            )
+            return
         self.fabric_picker.configure(
-            values=self.fabric_versions or ("No Fabric versions found",),
+            values=self.fabric_versions or ("Keine Fabric-Version gefunden",),
         )
         if self.fabric_versions:
             self.fabric_picker.configure(state="readonly")
@@ -363,33 +379,28 @@ class StodoLauncher:
                 selected if selected in self.fabric_versions else self.fabric_versions[0]
             )
             if self.process is None:
-                self.play_button.configure(state="normal", text="▶   PLAY")
-            self._set_status("Fabric versions refreshed")
+                self.play_button.configure(state="normal", text="▶   SPIELEN")
+            self._set_status("Fabric-Versionen aktualisiert")
         else:
-            self.fabric_version.set("No Fabric versions found")
+            self.fabric_version.set("Keine Fabric-Version gefunden")
             self.fabric_picker.configure(state="disabled")
             self.play_button.configure(state="disabled")
-            self._set_status("Install Fabric to play", "#e3b94f")
+            self._set_status("Fabric installieren, um zu spielen", "#e3b94f")
 
     def _run_launcher(self, command):
         try:
             process = subprocess.Popen(
                 command,
                 cwd=str(ROOT_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=_backend_process_environment(),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             self.events.put(("started", process))
-            if process.stdout is not None:
-                for line in process.stdout:
-                    self.events.put(("line", line.rstrip()))
             self.events.put(("exited", process.wait()))
-        except OSError as error:
-            self.events.put(("error", str(error)))
+        except OSError:
+            self.events.put(("error", "Der Launcherprozess konnte nicht gestartet werden."))
 
     def _poll(self):
         while True:
@@ -399,78 +410,30 @@ class StodoLauncher:
                 break
             if kind == "started":
                 self.process = value
-                self._set_status("Preparing your game...", COLORS["gold"])
-            elif kind == "line":
-                self._handle_output(value)
+                self._set_status("Minecraft wird vorbereitet ...", COLORS["gold"])
             elif kind == "exited":
                 self.process = None
-                self.play_button.configure(state="normal", text="▶   PLAY")
+                self.play_button.configure(state="normal", text="▶   SPIELEN")
                 self.fabric_picker.configure(state="readonly")
                 if value == 0:
-                    self._set_status("Ready to play")
+                    self._set_status("Bereit zum Spielen")
                 else:
-                    self._set_status("Launcher stopped with an error", "#e36c61")
+                    self._set_status("Beim Start ist ein Fehler aufgetreten.", "#e36c61")
                     messagebox.showerror(
-                        "Launcher stopped",
-                        "The launcher encountered a problem. Check the launcher log for details.",
+                        "Startfehler",
+                        "Minecraft konnte nicht gestartet werden. Bitte versuche es erneut.",
                         parent=self.root,
                     )
             elif kind == "error":
                 self.process = None
-                self.play_button.configure(state="normal", text="▶   PLAY")
+                self.play_button.configure(state="normal", text="▶   SPIELEN")
                 self.fabric_picker.configure(state="readonly")
-                self._set_status("Could not start launcher", "#e36c61")
-                messagebox.showerror("Could not start launcher", value, parent=self.root)
+                self._set_status("Launcher konnte nicht gestartet werden.", "#e36c61")
+                messagebox.showerror("Startfehler", value, parent=self.root)
 
-        self._read_log()
         self.root.after(350, self._poll)
 
-    def _handle_output(self, line):
-        lower = line.lower()
-        if "starting minecraft" in lower:
-            self._set_status("Minecraft is running")
-        elif "signed in as" in lower:
-            self._set_status(line.strip(), COLORS["gold"])
-
-    def _read_log(self):
-        try:
-            stat = LOG_FILE.stat()
-            if self.log_mtime is None:
-                self.log_mtime = stat.st_mtime_ns
-            elif stat.st_mtime_ns != self.log_mtime:
-                if not self.log_active:
-                    self.log_position = 0
-                    self.log_active = True
-                self.log_mtime = stat.st_mtime_ns
-            with LOG_FILE.open("r", encoding="utf-8", errors="replace") as log:
-                log.seek(self.log_position)
-                chunk = log.read()
-                self.log_position = log.tell()
-        except OSError:
-            return
-        for line in chunk.splitlines():
-            self._handle_output(line)
-
-def run_backend():
-    bundle_dir = Path(getattr(sys, "_MEIPASS", ROOT_DIR))
-    backend_script = bundle_dir / "main.pyw"
-    if not backend_script.exists():
-        backend_script = bundle_dir / "main.py"
-    if not backend_script.exists():
-        messagebox.showerror(
-            "Launcher error",
-            "The bundled Minecraft launcher backend could not be found.",
-        )
-        raise SystemExit(1)
-
-    sys.argv = [arg for arg in sys.argv if arg != "--backend"]
-    runpy.run_path(str(backend_script), run_name="__main__")
-
-
-if __name__ == "__main__":
-    if "--backend" in sys.argv:
-        run_backend()
-    else:
-        app_root = tk.Tk()
-        StodoLauncher(app_root)
-        app_root.mainloop()
+def run():
+    app_root = tk.Tk()
+    StodoLauncher(app_root)
+    app_root.mainloop()

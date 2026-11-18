@@ -1,13 +1,7 @@
 {
   "name": "stodo-mc-launcher",
   "version": "1.0.0",
-  "description": "",
-  "main": "login.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
+  "description": "Microsoft authentication helper for Stodo Mc Launcher",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {

@@ -12,9 +12,9 @@ Only needs the Python standard library.
 import hashlib
 import json
 import re
-import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from pathlib import Path
 
 LOADER = "fabric"
@@ -45,8 +45,7 @@ def parse_entries(lines):
         elif SLUG_RE.match(target):
             slug = target
         else:
-            print(f"[WARN] Ignoring unrecognised entry: {line}")
-            continue
+            raise ValueError(f"Ungültiger Mod-Eintrag: {line}")
 
         slug = slug.lower()
         if slug in seen:
@@ -96,44 +95,40 @@ def download(version, out_dir):
     # Use only the file name, never a path from the API response
     filename = Path(f["filename"]).name
     if not filename.lower().endswith(".jar"):
-        raise RuntimeError(f"Unexpected file type: {filename}")
+        raise RuntimeError(f"Unerwarteter Dateityp: {filename}")
 
     target = out_dir / filename
     expected = f["hashes"].get("sha512")
 
     if target.exists() and expected and \
             hashlib.sha512(target.read_bytes()).hexdigest() == expected:
-        return target, False  # already present and valid
+        return
 
     req = urllib.request.Request(f["url"], headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=120) as resp:
         data = resp.read()
 
     if expected and hashlib.sha512(data).hexdigest() != expected:
-        raise RuntimeError(f"Hash mismatch for {filename}")
+        raise RuntimeError(f"Die Prüfsumme von {filename} stimmt nicht überein.")
 
     target.write_bytes(data)
-    return target, True
 
 
 def install_mods(mod_lines, mc_version, out_dir, with_deps=True):
     """Install the mods into out_dir. Returns the list of mods that failed."""
     entries = parse_entries(mod_lines)
     if not entries:
-        print("No mods to install.")
         return []
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    queue = [(slug, pin, False) for slug, pin in entries]
+    queue = deque(entries)
     done = set()
     failed = []
 
-    print(f"Minecraft {mc_version} | loader: {LOADER} | {len(entries)} mods -> {out_dir}\n")
-
     while queue:
-        project, pin, is_dep = queue.pop(0)
+        project, pin = queue.popleft()
         if project in done:
             continue
         done.add(project)
@@ -141,32 +136,18 @@ def install_mods(mod_lines, mc_version, out_dir, with_deps=True):
         try:
             version = find_version(project, mc_version, pin)
             if version is None:
-                what = f"version {pin}" if pin else f"a {LOADER} build"
-                print(f"[FAIL] {project}: no {what} for Minecraft {mc_version}")
                 failed.append(project)
                 continue
 
-            path, fresh = download(version, out_dir)
-            status = "OK  " if fresh else "SKIP"
-            label = f"{project} (dependency)" if is_dep else project
-            print(f"[{status}] {label:<36} {version['version_number']}  ->  {path.name}")
+            download(version, out_dir)
 
             if with_deps:
                 for dep in version.get("dependencies", []):
                     if dep["dependency_type"] == "required" and dep.get("project_id"):
                         if dep["project_id"] not in done:
-                            queue.append((dep["project_id"], None, True))
+                            queue.append((dep["project_id"], None))
 
-        except urllib.error.HTTPError as e:
-            print(f"[FAIL] {project}: HTTP {e.code}")
-            failed.append(project)
-        except Exception as e:  # noqa: BLE001
-            print(f"[FAIL] {project}: {e}")
+        except Exception:
             failed.append(project)
 
-    print()
-    if failed:
-        print("Not installed: " + ", ".join(failed))
-    else:
-        print("All mods installed.")
     return failed

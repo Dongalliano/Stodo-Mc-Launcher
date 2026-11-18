@@ -1,7 +1,13 @@
-# Login tokens: never commit these
-auth-cache/
+# Runtime data
+/auth-cache/
+/launcher.log
+# Minecraft runtime output
+logs/
+crash-reports/
+config/
 
 # Node dependencies (restored with npm install)
+/src/js/node_modules/
 node_modules/
 
 # PyInstaller output
@@ -10,14 +16,9 @@ dist/
 
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 venv/
 
 # Editor
 .vscode/
-
-# Leftovers from game runs
-logs/
-crash-reports/
-config/

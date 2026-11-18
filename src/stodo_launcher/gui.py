@@ -1,7 +1,9 @@
+import ctypes
 import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -26,7 +28,11 @@ COLORS = {
     "muted": "#a7afa3",
     "line": "#3b4339",
     "gold": "#f3ce68",
+    "disabled": "#777d77",
 }
+
+STATUS_FILE_ENV = "STODO_LAUNCHER_STATUS_FILE"
+GAME_MUTEX_NAME = "Local\\StodoMcLauncherGame"
 
 
 def minecraft_directory():
@@ -62,12 +68,40 @@ def launch_command(fabric_version):
     raise FileNotFoundError("Die Startdatei main.py wurde nicht gefunden.")
 
 
-def _backend_process_environment():
-    if not getattr(sys, "frozen", False):
-        return None
+def _backend_process_environment(status_file):
     environment = os.environ.copy()
-    environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    environment[STATUS_FILE_ENV] = str(status_file)
+    if getattr(sys, "frozen", False):
+        environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     return environment
+
+
+def _backend_working_directory():
+    if getattr(sys, "frozen", False):
+        return Path.home()
+    return ROOT_DIR
+
+
+def _minecraft_is_running():
+    if os.name != "nt":
+        return False
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenMutexW.restype = ctypes.c_void_p
+    kernel32.OpenMutexW.argtypes = [
+        ctypes.c_uint32, ctypes.c_int, ctypes.c_wchar_p,
+    ]
+    handle = kernel32.OpenMutexW(0x00100000, False, GAME_MUTEX_NAME)
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == 2:
+            return False
+        raise ctypes.WinError(error)
+
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.CloseHandle(handle)
+    return True
 
 
 class StodoLauncher:
@@ -75,6 +109,15 @@ class StodoLauncher:
         self.root = root
         self.events = queue.Queue()
         self.process = None
+        self.launching = False
+        self.last_backend_status = ""
+        self.status_file = self._create_status_file()
+        self.game_status_error = False
+        try:
+            self.game_running = _minecraft_is_running()
+        except OSError:
+            self.game_running = False
+            self.game_status_error = True
         self.state = "Bereit zum Spielen"
         try:
             self.fabric_versions = get_installed_fabric_versions()
@@ -85,6 +128,18 @@ class StodoLauncher:
         self.fabric_version = tk.StringVar()
         self._make_window()
         self._make_layout()
+        self._sync_play_button()
+        if self.game_running:
+            self._set_status("Minecraft läuft")
+        elif self.game_status_error:
+            self._set_status("Spielstatus konnte nicht geprüft werden.", "#e36c61")
+            self.root.after_idle(lambda: messagebox.showerror(
+                "Status konnte nicht geprüft werden",
+                "Der Minecraft-Status konnte nicht ermittelt werden. Der Start bleibt "
+                "zur Sicherheit deaktiviert.",
+                parent=self.root,
+            ))
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
         if self.fabric_versions_error:
             self.root.after_idle(lambda: messagebox.showerror(
                 "Fehler beim Laden",
@@ -92,6 +147,11 @@ class StodoLauncher:
                 parent=self.root,
             ))
         self.root.after(350, self._poll)
+
+    def _create_status_file(self):
+        descriptor, path = tempfile.mkstemp(prefix="stodo-launcher-", suffix=".status")
+        os.close(descriptor)
+        return Path(path)
 
     def _make_window(self):
         self.root.title("Stodo Mc Launcher")
@@ -270,8 +330,16 @@ class StodoLauncher:
         )
         if width:
             button.configure(width=width)
-        button.bind("<Enter>", lambda event: event.widget.configure(bg=hover))
-        button.bind("<Leave>", lambda event: event.widget.configure(bg=bg))
+        def on_enter(event):
+            if event.widget["state"] != "disabled":
+                event.widget.configure(bg=hover)
+
+        def on_leave(event):
+            if event.widget["state"] != "disabled":
+                event.widget.configure(bg=bg)
+
+        button.bind("<Enter>", on_enter)
+        button.bind("<Leave>", on_leave)
         return button
 
     def _draw_cube(self, canvas, x, y, size):
@@ -340,8 +408,85 @@ class StodoLauncher:
         self.status_dot.delete("all")
         self.status_dot.create_oval(2, 2, 10, 10, fill=color, outline="")
 
+    def _sync_play_button(self):
+        if self.game_running:
+            self.play_button.configure(
+                state="disabled", text="SPIEL LÄUFT",
+                bg=COLORS["disabled"], activebackground=COLORS["disabled"],
+                disabledforeground="#e1e4e0", cursor="arrow",
+            )
+        elif self.launching or self.process is not None:
+            self.play_button.configure(
+                state="disabled", text="WIRD GESTARTET ...",
+                bg=COLORS["disabled"], activebackground=COLORS["disabled"],
+                disabledforeground="#e1e4e0", cursor="arrow",
+            )
+        elif self.game_status_error or not self.fabric_versions:
+            self.play_button.configure(
+                state="disabled", text="▶   SPIELEN",
+                bg=COLORS["disabled"], activebackground=COLORS["disabled"],
+                disabledforeground="#e1e4e0", cursor="arrow",
+            )
+        else:
+            self.play_button.configure(
+                state="normal", text="▶   SPIELEN",
+                bg=COLORS["green"], activebackground=COLORS["green_hover"],
+                disabledforeground="#e1e4e0", cursor="hand2",
+            )
+
+    def _read_backend_status(self):
+        try:
+            status = self.status_file.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return
+        if status and status != self.last_backend_status:
+            self.last_backend_status = status
+            self._set_status(status, COLORS["gold"])
+
+    def _refresh_game_state(self):
+        if os.name != "nt":
+            return
+        try:
+            running = _minecraft_is_running()
+        except OSError:
+            if not self.game_status_error:
+                self.game_status_error = True
+                self._sync_play_button()
+                self._set_status("Spielstatus konnte nicht geprüft werden.", "#e36c61")
+                messagebox.showerror(
+                    "Status konnte nicht geprüft werden",
+                    "Der Minecraft-Status konnte nicht ermittelt werden. Der Start bleibt "
+                    "zur Sicherheit deaktiviert.",
+                    parent=self.root,
+                )
+            return
+
+        was_running = self.game_running
+        was_error = self.game_status_error
+        self.game_status_error = False
+        self.game_running = running
+        if running != was_running or was_error:
+            self._sync_play_button()
+            if running:
+                self._set_status("Minecraft läuft")
+            elif self.process is None and not self.launching:
+                self._set_status(
+                    "Bereit zum Spielen" if self.fabric_versions
+                    else "Fabric installieren, um zu spielen"
+                )
+
+    def _close(self):
+        try:
+            self.status_file.unlink()
+        except FileNotFoundError:
+            pass
+        self.root.destroy()
+
     def _launch(self):
-        if self.process is not None:
+        if (
+            self.process is not None or self.launching or self.game_running
+            or self.game_status_error
+        ):
             return
         try:
             selected_version = self.fabric_version.get()
@@ -354,7 +499,10 @@ class StodoLauncher:
             messagebox.showerror("Startfehler", message, parent=self.root)
             return
 
-        self.play_button.configure(state="disabled", text="WIRD GESTARTET ...")
+        self.launching = True
+        self.last_backend_status = ""
+        self.status_file.write_text("", encoding="utf-8")
+        self._sync_play_button()
         self.fabric_picker.configure(state="disabled")
         self._set_status("Launcher wird vorbereitet ...", COLORS["gold"])
         threading.Thread(target=self._run_launcher, args=(command,), daemon=True).start()
@@ -378,23 +526,24 @@ class StodoLauncher:
             self.fabric_version.set(
                 selected if selected in self.fabric_versions else self.fabric_versions[0]
             )
-            if self.process is None:
-                self.play_button.configure(state="normal", text="▶   SPIELEN")
-            self._set_status("Fabric-Versionen aktualisiert")
+            self._sync_play_button()
+            if not self.game_running and not self.launching and self.process is None:
+                self._set_status("Fabric-Versionen aktualisiert")
         else:
             self.fabric_version.set("Keine Fabric-Version gefunden")
             self.fabric_picker.configure(state="disabled")
-            self.play_button.configure(state="disabled")
-            self._set_status("Fabric installieren, um zu spielen", "#e3b94f")
+            self._sync_play_button()
+            if not self.game_running and not self.launching and self.process is None:
+                self._set_status("Fabric installieren, um zu spielen", "#e3b94f")
 
     def _run_launcher(self, command):
         try:
             process = subprocess.Popen(
                 command,
-                cwd=str(ROOT_DIR),
+                cwd=str(_backend_working_directory()),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                env=_backend_process_environment(),
+                env=_backend_process_environment(self.status_file),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             self.events.put(("started", process))
@@ -410,13 +559,19 @@ class StodoLauncher:
                 break
             if kind == "started":
                 self.process = value
+                self.launching = False
+                self._sync_play_button()
                 self._set_status("Minecraft wird vorbereitet ...", COLORS["gold"])
             elif kind == "exited":
                 self.process = None
-                self.play_button.configure(state="normal", text="▶   SPIELEN")
-                self.fabric_picker.configure(state="readonly")
+                self.launching = False
+                self._sync_play_button()
+                self.fabric_picker.configure(
+                    state="readonly" if self.fabric_versions else "disabled",
+                )
                 if value == 0:
-                    self._set_status("Bereit zum Spielen")
+                    if not self.game_running:
+                        self._set_status("Bereit zum Spielen")
                 else:
                     self._set_status("Beim Start ist ein Fehler aufgetreten.", "#e36c61")
                     messagebox.showerror(
@@ -426,11 +581,16 @@ class StodoLauncher:
                     )
             elif kind == "error":
                 self.process = None
-                self.play_button.configure(state="normal", text="▶   SPIELEN")
-                self.fabric_picker.configure(state="readonly")
+                self.launching = False
+                self._sync_play_button()
+                self.fabric_picker.configure(
+                    state="readonly" if self.fabric_versions else "disabled",
+                )
                 self._set_status("Launcher konnte nicht gestartet werden.", "#e36c61")
                 messagebox.showerror("Startfehler", value, parent=self.root)
 
+        self._read_backend_status()
+        self._refresh_game_state()
         self.root.after(350, self._poll)
 
 def run():

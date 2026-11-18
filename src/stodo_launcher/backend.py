@@ -32,6 +32,8 @@ APP_DIR.mkdir(parents=True, exist_ok=True)
 SRC_PATH = APP_DIR / "src"
 JS_PATH = SRC_PATH / "js"
 LOGIN_JS = JS_PATH / "login.js"
+STATUS_FILE_ENV = "STODO_LAUNCHER_STATUS_FILE"
+GAME_MUTEX_NAME = "Local\\StodoMcLauncherGame"
 
 
 # ---------- No-console mode ----------
@@ -58,6 +60,65 @@ def run(cmd, **kwargs):
         kwargs.setdefault("stderr", sys.stderr)
         kwargs.setdefault("creationflags", NO_WINDOW)
     return subprocess.run(cmd, **kwargs)
+
+
+def notify_status(text):
+    status_file = os.environ.get(STATUS_FILE_ENV)
+    if not status_file:
+        return
+    path = Path(status_file)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(text, encoding="utf-8")
+    os.replace(temporary_path, path)
+
+
+def _create_game_mutex():
+    if os.name != "nt":
+        return None
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CreateMutexW.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p,
+    ]
+    ctypes.set_last_error(0)
+    handle = kernel32.CreateMutexW(None, False, GAME_MUTEX_NAME)
+    error = ctypes.get_last_error()
+    if not handle:
+        raise ctypes.WinError(error)
+    if error == 183:
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        kernel32.CloseHandle(handle)
+        raise SystemExit("Minecraft läuft bereits.")
+    return handle
+
+
+def _close_game_mutex(handle):
+    if handle:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        if not kernel32.CloseHandle(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
+def start_game(cmd):
+    if HEADLESS:
+        return subprocess.Popen(
+            cmd,
+            cwd=MC_DIR,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=NO_WINDOW,
+        )
+    return subprocess.Popen(
+        cmd,
+        cwd=MC_DIR,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 _console_hidden = False
@@ -299,6 +360,7 @@ def ensure_node():
     if not shutil.which("winget"):
         sys.exit("winget ist nicht verfügbar. Installiere Node.js (LTS) manuell von https://nodejs.org und starte den Launcher erneut.")
 
+    notify_status("Node.js wird installiert ...")
     run([
         "winget", "install", "OpenJS.NodeJS.LTS",
         "--silent", "--accept-package-agreements", "--accept-source-agreements",
@@ -318,12 +380,15 @@ def node_env(node):
 
 def ensure_packages(node, env):
     if (JS_PATH / "node_modules" / "prismarine-auth").exists():
+        notify_status("Anmeldemodul ist installiert")
         return
+    notify_status("Anmeldemodul wird installiert ...")
     npm = node.parent / "npm.cmd"
     npm_cmd = str(npm) if npm.exists() else (shutil.which("npm.cmd") or "npm.cmd")
     result = run([npm_cmd, "install", "prismarine-auth"], cwd=JS_PATH, env=env)
     if result.returncode != 0:
         sys.exit("Das Anmeldemodul konnte nicht installiert werden.")
+    notify_status("Anmeldemodul wurde installiert")
 
 
 # ---------- Fabric ----------
@@ -389,6 +454,7 @@ def main(fabric_version=None):
     if not acquire_single_instance():
         sys.exit("Der Launcher ist bereits geöffnet.")
 
+    notify_status("Serverkonfiguration wird geladen ...")
     sync_resources()
     if not LOGIN_JS.exists():
         sys.exit("Die Anmeldedateien des Launchers fehlen.")
@@ -402,16 +468,21 @@ def main(fabric_version=None):
     server = get_server(config)
     mods = get_mods(config)
 
+    notify_status("Prüfe Node.js ...")
     node = ensure_node()
+    notify_status("Node.js ist installiert")
     env = node_env(node)
     ensure_packages(node, env)
 
+    notify_status("Fabric-Profil wird vorbereitet ...")
     fabric_id = find_newest_fabric(fabric_version)
     mc_version = get_game_version(fabric_id)
 
+    notify_status("Microsoft-Anmeldung wird vorbereitet ...")
     login = get_login(node, env)
 
     # Makes sure the base game, libraries and assets are present
+    notify_status("Minecraft-Dateien werden vorbereitet ...")
     mll.install.install_minecraft_version(fabric_id, MC_DIR)
 
     options: MinecraftOptions = {
@@ -433,26 +504,35 @@ def main(fabric_version=None):
     cmd = mll.command.get_minecraft_command(fabric_id, MC_DIR, options)
 
     swapped = False
+    game_mutex = None
     try:
         if mods:
             # 1. Move your own mods away, 2. install the server mods
             stash_mods()
             swapped = True
 
+            notify_status("Mods werden installiert ...")
             failed = install_mods(mods, mc_version, MODS_DIR)
             if failed:
                 sys.exit("Mods konnten nicht installiert werden: " + ", ".join(failed))
 
+        notify_status("Minecraft wird gestartet ...")
+        game_mutex = _create_game_mutex()
         hide_console()
-        run(cmd, cwd=MC_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        game_process = start_game(cmd)
+        notify_status("Minecraft läuft")
+        game_process.wait()
     finally:
-        # 3. Delete the installed mods, 4. move your own mods back
-        if swapped:
-            if not restore_mods():
-                sys.exit(
-                    "Einige Mods konnten nicht wiederhergestellt werden. "
-                    "Deine Sicherung liegt hier: " + str(BACKUP_MODS)
-                )
+        try:
+            # 3. Delete the installed mods, 4. move your own mods back
+            if swapped:
+                if not restore_mods():
+                    sys.exit(
+                        "Einige Mods konnten nicht wiederhergestellt werden. "
+                        "Deine Sicherung liegt hier: " + str(BACKUP_MODS)
+                    )
+        finally:
+            _close_game_mutex(game_mutex)
 
 
 def cli(show_errors=True):
@@ -475,3 +555,10 @@ def cli(show_errors=True):
                 "Internetverbindung und die Minecraft-Installation."
             )
         return 1
+    finally:
+        status_file = os.environ.get(STATUS_FILE_ENV)
+        if status_file:
+            try:
+                Path(status_file).unlink()
+            except FileNotFoundError:
+                pass

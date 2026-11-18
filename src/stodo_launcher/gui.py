@@ -11,6 +11,8 @@ from tkinter import messagebox, ttk
 
 import minecraft_launcher_lib as mll
 
+from . import updater
+
 
 ROOT_DIR = (
     Path(getattr(sys, "_MEIPASS"))
@@ -105,11 +107,15 @@ def _minecraft_is_running():
 
 
 class StodoLauncher:
-    def __init__(self, root):
+    def __init__(self, root, current_version):
         self.root = root
+        self.current_version = current_version
         self.events = queue.Queue()
         self.process = None
         self.launching = False
+        self.update_checking = getattr(sys, "frozen", False)
+        self.pending_update = None
+        self.update_replacement_scheduled = False
         self.last_backend_status = ""
         self.status_file = self._create_status_file()
         self.game_status_error = False
@@ -129,7 +135,9 @@ class StodoLauncher:
         self._make_window()
         self._make_layout()
         self._sync_play_button()
-        if self.game_running:
+        if self.update_checking:
+            self._set_status("Prüfe auf Launcher-Updates ...", COLORS["gold"])
+        elif self.game_running:
             self._set_status("Minecraft läuft")
         elif self.game_status_error:
             self._set_status("Spielstatus konnte nicht geprüft werden.", "#e36c61")
@@ -146,6 +154,8 @@ class StodoLauncher:
                 "Die installierten Fabric-Versionen konnten nicht ermittelt werden.",
                 parent=self.root,
             ))
+        if self.update_checking:
+            self.root.after_idle(self._start_update_check)
         self.root.after(350, self._poll)
 
     def _create_status_file(self):
@@ -421,6 +431,12 @@ class StodoLauncher:
                 bg=COLORS["disabled"], activebackground=COLORS["disabled"],
                 disabledforeground="#e1e4e0", cursor="arrow",
             )
+        elif self.update_checking or self.pending_update is not None:
+            self.play_button.configure(
+                state="disabled", text="UPDATE WIRD GEPRÜFT ...",
+                bg=COLORS["disabled"], activebackground=COLORS["disabled"],
+                disabledforeground="#e1e4e0", cursor="arrow",
+            )
         elif self.game_status_error or not self.fabric_versions:
             self.play_button.configure(
                 state="disabled", text="▶   SPIELEN",
@@ -482,10 +498,63 @@ class StodoLauncher:
             pass
         self.root.destroy()
 
+    def _start_update_check(self):
+        threading.Thread(target=self._check_for_update, daemon=True).start()
+
+    def _check_for_update(self):
+        try:
+            result = updater.prepare_update(
+                self.current_version,
+                Path(sys.executable),
+                lambda text: self.events.put(("update_status", text)),
+            )
+        except updater.UpdateError as error:
+            self.events.put(("update_error", str(error)))
+        except Exception:
+            self.events.put((
+                "update_error",
+                "Beim Prüfen des Launcher-Updates ist ein unerwarteter Fehler aufgetreten.",
+            ))
+        else:
+            if result is None:
+                self.events.put(("update_current", None))
+            else:
+                self.events.put(("update_ready", result))
+
+    def _apply_pending_update(self):
+        if (
+            self.pending_update is None or self.update_replacement_scheduled
+            or self.game_running or self.game_status_error or self.process is not None
+            or self.launching
+        ):
+            return
+
+        version, staged_path = self.pending_update
+        try:
+            updater.schedule_replacement(staged_path, Path(sys.executable))
+        except updater.UpdateError as error:
+            self.pending_update = None
+            try:
+                staged_path.unlink()
+            except FileNotFoundError:
+                pass
+            self._sync_play_button()
+            self._set_status(str(error), "#e36c61")
+            messagebox.showerror("Launcher-Update", str(error), parent=self.root)
+            return
+
+        self.update_replacement_scheduled = True
+        self._set_status(
+            f"Launcher-Version {version} wird installiert. Der Launcher startet neu ...",
+            COLORS["gold"],
+        )
+        self._close()
+
     def _launch(self):
         if (
             self.process is not None or self.launching or self.game_running
-            or self.game_status_error
+            or self.game_status_error or self.update_checking
+            or self.pending_update is not None
         ):
             return
         try:
@@ -588,12 +657,35 @@ class StodoLauncher:
                 )
                 self._set_status("Launcher konnte nicht gestartet werden.", "#e36c61")
                 messagebox.showerror("Startfehler", value, parent=self.root)
+            elif kind == "update_status":
+                self._set_status(value, COLORS["gold"])
+            elif kind == "update_current":
+                self.update_checking = False
+                self._sync_play_button()
+                if not self.game_running:
+                    self._set_status("Der Launcher ist auf dem neuesten Stand.")
+            elif kind == "update_error":
+                self.update_checking = False
+                self._sync_play_button()
+                self._set_status(value, "#e3b94f")
+            elif kind == "update_ready":
+                self.update_checking = False
+                self.pending_update = value
+                self._sync_play_button()
+                if self.game_running:
+                    self._set_status(
+                        "Update bereit. Es wird nach dem Schließen von Minecraft installiert.",
+                        COLORS["gold"],
+                    )
+                else:
+                    self._set_status("Update wird vorbereitet ...", COLORS["gold"])
 
         self._read_backend_status()
         self._refresh_game_state()
+        self._apply_pending_update()
         self.root.after(350, self._poll)
 
-def run():
+def run(current_version):
     app_root = tk.Tk()
-    StodoLauncher(app_root)
+    StodoLauncher(app_root, current_version)
     app_root.mainloop()

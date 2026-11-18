@@ -7,7 +7,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from stodo_launcher import backend, gui, mod_installer
+from stodo_launcher import backend, gui, mod_installer, updater
 
 
 class LauncherTests(unittest.TestCase):
@@ -42,6 +42,107 @@ class LauncherTests(unittest.TestCase):
             gui, "ROOT_DIR", extraction_dir,
         ):
             self.assertEqual(gui._backend_working_directory(), extraction_dir)
+
+    def test_updater_compares_numeric_versions_and_skips_equal_versions(self):
+        self.assertTrue(updater.is_newer_version("1.10.0", "1.9.9"))
+        self.assertFalse(updater.is_newer_version("1.0.0", "1.0"))
+        self.assertFalse(updater.is_newer_version("1.0.0", "1.0.1"))
+        with self.assertRaises(updater.UpdateError):
+            updater.is_newer_version("latest", "1.0.0")
+
+        with patch.object(updater, "get_latest_version", return_value="1.0.0"), patch.object(
+            updater, "download_update",
+        ) as download:
+            self.assertIsNone(updater.prepare_update("1.0", Path("StodoMcLauncher.exe"), Mock()))
+
+        download.assert_not_called()
+        status_updates = []
+        staged_path = Path("StodoMcLauncher.update.exe")
+        with patch.object(updater, "get_latest_version", return_value="1.0.1"), patch.object(
+            updater, "download_update", return_value=staged_path,
+        ) as download:
+            result = updater.prepare_update(
+                "1.0.0",
+                Path("StodoMcLauncher.exe"),
+                status_updates.append,
+            )
+
+        self.assertEqual(result, ("1.0.1", staged_path))
+        download.assert_called_once_with(Path("StodoMcLauncher.exe"))
+        self.assertEqual(status_updates, ["Lade Launcher-Version 1.0.1 herunter ..."])
+
+    def test_updater_downloads_and_validates_a_windows_executable(self):
+        executable = bytearray(128)
+        executable[:2] = b"MZ"
+        executable[0x3C:0x40] = (64).to_bytes(4, "little")
+        executable[64:68] = b"PE\0\0"
+
+        class FakeResponse(io.BytesIO):
+            @property
+            def headers(self):
+                return {"Content-Length": str(len(executable))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                self.close()
+
+        response = FakeResponse(executable)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "StodoMcLauncher.exe"
+            with patch.object(updater.urllib.request, "urlopen", return_value=response):
+                staged = updater.download_update(target)
+            try:
+                self.assertTrue(updater._is_windows_executable(staged))
+                self.assertEqual(staged.read_bytes(), executable)
+                self.assertEqual(staged.parent, target.parent)
+            finally:
+                staged.unlink()
+
+    def test_updater_removes_an_invalid_download(self):
+        class FakeResponse(io.BytesIO):
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                self.close()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "StodoMcLauncher.exe"
+            with patch.object(
+                updater.urllib.request,
+                "urlopen",
+                return_value=FakeResponse(b"<html>not an executable</html>"),
+            ):
+                with self.assertRaises(updater.UpdateError):
+                    updater.download_update(target)
+
+            self.assertEqual(list(Path(temp_dir).iterdir()), [])
+
+    def test_updater_schedules_a_unicode_powershell_helper(self):
+        command = []
+
+        def capture_command(arguments, **kwargs):
+            command.extend(arguments)
+
+        with patch.object(updater.shutil, "which", return_value="powershell.exe"), patch.object(
+            updater.subprocess, "Popen", side_effect=capture_command,
+        ):
+            updater.schedule_replacement(
+                Path("StodoMcLauncher.update.exe"),
+                Path("StodoMcLauncher.exe"),
+            )
+
+        script_path = Path(command[command.index("-File") + 1])
+        try:
+            script = script_path.read_text(encoding="utf-8-sig")
+            self.assertIn("Move-Item -LiteralPath", script)
+            self.assertIn("Schreibrechte", script)
+        finally:
+            script_path.unlink()
 
     def test_backend_status_updates_the_temporary_status_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -35,6 +35,7 @@ $required = @(
     (Join-Path $PackageDir "backend.py"),
     (Join-Path $PackageDir "gui.py"),
     (Join-Path $PackageDir "mod_installer.py"),
+    (Join-Path $PackageDir "updater.py"),
     (Join-Path $JsDir "login.js"),
     (Join-Path $JsDir "package.json"),
     (Join-Path $JsDir "package-lock.json")

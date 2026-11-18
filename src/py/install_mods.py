@@ -1,79 +1,51 @@
-#!/usr/bin/env python3
-"""
-Installs a specific Minecraft version of Fabric mods from Modrinth.
-The mods are read from a text file.
+"""Installs Fabric mods from Modrinth for a given Minecraft version.
 
-Mod list format (e.g. "Client Mods.txt"): one mod per line.
-Lines starting with '#' (headers/comments) and empty lines are ignored,
-so the file may also contain nothing but links.
-
-    # Performance #                         <- ignored
+Each entry is a Modrinth URL or plain slug, optionally followed by an exact version:
     https://modrinth.com/mod/sodium
-    https://modrinth.com/mod/lithium 0.14.3+mc26.3   <- optional exact version pin
-    modmenu                                 <- a plain slug works too
+    https://modrinth.com/mod/lithium 0.14.3+mc26.3
+    modmenu
 
-Usage:
-    python install_mods.py                  (asks for Minecraft version and mod file)
-    python install_mods.py "Client Mods.txt"
-    python install_mods.py "Client Mods.txt" -v 26.3 -o ./custom_folder
-    python install_mods.py "Client Mods.txt" --no-deps
-
-Required dependencies of each mod (e.g. Fabric API) are installed automatically.
-By default the mods are saved in a folder named after the input file
-(e.g. "Client Mods.txt" -> ./Client Mods/). Use -o to choose another folder.
-
-Only needs the Python standard library (3.8+).
+Required dependencies (e.g. Fabric API) are installed automatically.
+Only needs the Python standard library.
 """
 
-import argparse
 import hashlib
 import json
 import re
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
-DEFAULT_MC_VERSION = "26.3"
-DEFAULT_MOD_FILE = "mods.txt"
 LOADER = "fabric"
-
 API = "https://api.modrinth.com/v2"
-USER_AGENT = "fabric-mod-installer/1.1 (personal script)"
+USER_AGENT = "StodoMcLauncher-mod-installer/1.0"
 
-URL_RE = re.compile(r"modrinth\.com/(?:mod|plugin)/([^/\s?#]+)", re.IGNORECASE)
+URL_RE = re.compile(r"^https?://(?:www\.)?modrinth\.com/(?:mod|plugin)/([^/\s?#]+)", re.IGNORECASE)
 SLUG_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
-# ----------------------------------------------------------------------------
-# Mod list parsing
-# ----------------------------------------------------------------------------
-def parse_mod_file(path):
+def parse_entries(lines):
     """Return a list of (slug, pinned_version_or_None). '#' lines are ignored."""
     entries = []
     seen = set()
 
-    for raw in Path(path).read_text(encoding="utf-8-sig").splitlines():
+    for raw in lines:
         line = raw.strip()
-        if not line:
-            continue
-
-        # headers / comments such as "# Visual #"
-        if line.startswith("#"):
+        if not line or line.startswith("#"):
             continue
 
         parts = line.split(None, 1)
         target = parts[0]
         pin = parts[1].strip() if len(parts) > 1 else None
 
-        m = URL_RE.search(target)
+        m = URL_RE.match(target)
         if m:
             slug = m.group(1)
         elif SLUG_RE.match(target):
             slug = target
         else:
-            print(f"[WARN] Ignoring unrecognised line: {line}")
+            print(f"[WARN] Ignoring unrecognised entry: {line}")
             continue
 
         slug = slug.lower()
@@ -85,9 +57,6 @@ def parse_mod_file(path):
     return entries
 
 
-# ----------------------------------------------------------------------------
-# Modrinth helpers
-# ----------------------------------------------------------------------------
 def api_get(path, params=None):
     url = f"{API}{path}"
     if params:
@@ -123,7 +92,13 @@ def find_version(project, mc_version, pinned=None):
 def download(version, out_dir):
     files = version["files"]
     f = next((x for x in files if x.get("primary")), files[0])
-    target = out_dir / f["filename"]
+
+    # Use only the file name, never a path from the API response
+    filename = Path(f["filename"]).name
+    if not filename.lower().endswith(".jar"):
+        raise RuntimeError(f"Unexpected file type: {filename}")
+
+    target = out_dir / filename
     expected = f["hashes"].get("sha512")
 
     if target.exists() and expected and \
@@ -135,56 +110,27 @@ def download(version, out_dir):
         data = resp.read()
 
     if expected and hashlib.sha512(data).hexdigest() != expected:
-        raise RuntimeError(f"Hash mismatch for {f['filename']}")
+        raise RuntimeError(f"Hash mismatch for {filename}")
 
     target.write_bytes(data)
     return target, True
 
 
-# ----------------------------------------------------------------------------
-# Main
-# ----------------------------------------------------------------------------
-def ask(question, default):
-    answer = input(f"{question} [{default}]: ").strip()
-    return answer or default
-
-
-def install_mods():
-    parser = argparse.ArgumentParser(description="Install Fabric mods from Modrinth")
-    parser.add_argument("modfile", nargs="?", default=None,
-                        help="Text file with mod URLs (asked interactively if omitted)")
-    parser.add_argument("-v", "--version", default=None,
-                        help="Minecraft version (asked interactively if omitted)")
-    parser.add_argument("-o", "--output", default=None,
-                        help="Output folder (default: folder named after the mod file)")
-    parser.add_argument("--no-deps", action="store_true",
-                        help="Do not install required dependencies")
-    args = parser.parse_args()
-
-    if args.version is None:
-        args.version = ask("Minecraft version", DEFAULT_MC_VERSION)
-    if args.modfile is None:
-        txt_files = sorted(p.name for p in Path.cwd().glob("*.txt"))
-        if txt_files:
-            print("Text files in this folder: " + ", ".join(txt_files))
-        args.modfile = ask("Mod list file", DEFAULT_MOD_FILE).strip('"\'')
-
-    if not Path(args.modfile).is_file():
-        sys.exit(f"Mod list not found: {args.modfile}")
-
-    entries = parse_mod_file(args.modfile)
+def install_mods(mod_lines, mc_version, out_dir, with_deps=True):
+    """Install the mods into out_dir. Returns the list of mods that failed."""
+    entries = parse_entries(mod_lines)
     if not entries:
-        sys.exit("No mods found in the file.")
+        print("No mods to install.")
+        return []
 
-    out_dir = Path(args.output) if args.output else Path(Path(args.modfile).stem)
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     queue = [(slug, pin, False) for slug, pin in entries]
     done = set()
     failed = []
 
-    print(f"Minecraft {args.version} | loader: {LOADER} | "
-          f"{len(entries)} mods from '{args.modfile}' -> {out_dir.resolve()}\n")
+    print(f"Minecraft {mc_version} | loader: {LOADER} | {len(entries)} mods -> {out_dir}\n")
 
     while queue:
         project, pin, is_dep = queue.pop(0)
@@ -193,20 +139,19 @@ def install_mods():
         done.add(project)
 
         try:
-            version = find_version(project, args.version, pin)
+            version = find_version(project, mc_version, pin)
             if version is None:
                 what = f"version {pin}" if pin else f"a {LOADER} build"
-                print(f"[FAIL] {project}: no {what} for Minecraft {args.version}")
+                print(f"[FAIL] {project}: no {what} for Minecraft {mc_version}")
                 failed.append(project)
                 continue
 
             path, fresh = download(version, out_dir)
             status = "OK  " if fresh else "SKIP"
             label = f"{project} (dependency)" if is_dep else project
-            print(f"[{status}] {label:<36} "
-                  f"{version['version_number']}  ->  {path.name}")
+            print(f"[{status}] {label:<36} {version['version_number']}  ->  {path.name}")
 
-            if not args.no_deps:
+            if with_deps:
                 for dep in version.get("dependencies", []):
                     if dep["dependency_type"] == "required" and dep.get("project_id"):
                         if dep["project_id"] not in done:
@@ -224,3 +169,4 @@ def install_mods():
         print("Not installed: " + ", ".join(failed))
     else:
         print("All mods installed.")
+    return failed

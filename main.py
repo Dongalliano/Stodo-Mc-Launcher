@@ -1,21 +1,137 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 import minecraft_launcher_lib as mll
 
 # ---- Configuration ----
-SERVER = "donutsmp.net"
+SERVER_JSON_URL = "https://raw.githubusercontent.com/Dongalliano/Stodo-Mc-Launcher/main/server.json"
 # -----------------------
 
 SCRIPT_PATH = Path(__file__).parent
 SRC_PATH = SCRIPT_PATH / "src"
 JS_PATH = SRC_PATH / "js"
+PY_PATH = SRC_PATH / "py"
 LOGIN_JS = JS_PATH / "login.js"
-MC_DIR = mll.utils.get_minecraft_directory()
+MC_DIR = Path(mll.utils.get_minecraft_directory())
+
+MODS_DIR = MC_DIR / "mods"
+BACKUP_DIR = MC_DIR / "mods_backup_stodo"   # temporary home of your own mods
+BACKUP_MODS = BACKUP_DIR / "mods"
+MANIFEST = BACKUP_DIR / "manifest.json"
+
+sys.path.insert(0, str(PY_PATH))
+from install_mods import install_mods  # noqa: E402
+
+# ---------- server.json (read straight from GitHub) ----------
+
+def load_config():
+    # Read server.json straight from GitHub (in memory, nothing is saved)
+    try:
+        req = urllib.request.Request(SERVER_JSON_URL, headers={"User-Agent": "StodoMcLauncher"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.load(resp)
+    except Exception as e:
+        sys.exit(f"Could not read server.json from GitHub: {e}")
+    if not isinstance(data, dict):
+        sys.exit("server.json on GitHub has an unexpected format.")
+    return data
+
+
+def valid_address(addr):
+    # hostname or IPv4, optional :port. Rejects anything that could be read as a launch option.
+    return isinstance(addr, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*(:\d{1,5})?", addr) is not None
+
+
+def get_server(config):
+    ip = config.get("ip")
+    if not valid_address(ip):
+        sys.exit("server.json on GitHub has no valid 'ip' entry.")
+    print(f"Server from GitHub: {ip}")
+    return ip
+
+
+def get_mods(config):
+    mods = config.get("mods", [])
+    if not isinstance(mods, list):
+        print("server.json: 'mods' is not a list, skipping mods.")
+        return []
+    return [m for m in mods if isinstance(m, str)]
+
+
+# ---------- Mod swap (stash your own mods, restore them afterwards) ----------
+
+def _delete(path):
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def stash_mods():
+    """Move everything in .minecraft/mods to the backup folder."""
+    MODS_DIR.mkdir(parents=True, exist_ok=True)
+    originals = [p.name for p in MODS_DIR.iterdir()]
+
+    # The list is written BEFORE anything is moved, so an interrupted run can be recovered
+    BACKUP_MODS.mkdir(parents=True, exist_ok=True)
+    MANIFEST.write_text(json.dumps({"originals": originals}), encoding="utf-8")
+
+    for name in originals:
+        shutil.move(str(MODS_DIR / name), str(BACKUP_MODS / name))
+    if originals:
+        print(f"Moved {len(originals)} of your own mods to: {BACKUP_MODS}")
+
+
+def restore_mods():
+    """Delete the mods installed by the launcher and move your own mods back.
+    Returns True if everything is back in place."""
+    if not MANIFEST.exists():
+        return True
+
+    try:
+        originals = set(json.loads(MANIFEST.read_text(encoding="utf-8")).get("originals", []))
+    except Exception:
+        print(f"The mod backup list is unreadable. Nothing was touched, your mods are in: {BACKUP_MODS}")
+        return False
+
+    ok = True
+    MODS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 1. Delete what the launcher installed.
+    #    An item that is one of your originals and is NOT in the backup was never moved
+    #    (interrupted run), so it is kept.
+    for item in list(MODS_DIR.iterdir()):
+        if item.name in originals and not (BACKUP_MODS / item.name).exists():
+            continue
+        try:
+            _delete(item)
+        except OSError as e:
+            print(f"Could not delete {item.name}: {e}")
+            ok = False
+
+    # 2. Move your own mods back
+    for name in originals:
+        src = BACKUP_MODS / name
+        if not src.exists():
+            continue
+        try:
+            shutil.move(str(src), str(MODS_DIR / name))
+        except OSError as e:
+            print(f"Could not restore {name}: {e}")
+            ok = False
+
+    if ok:
+        shutil.rmtree(BACKUP_DIR, ignore_errors=True)
+        print("Your own mods are back in place.")
+    else:
+        print(f"Some mods could not be restored. Close Minecraft and start the launcher again, or find them in: {BACKUP_MODS}")
+    return ok
 
 
 # ---------- Node.js ----------
@@ -80,7 +196,7 @@ def find_newest_fabric():
     for v in mll.utils.get_installed_versions(MC_DIR):
         vid = v["id"]
         if vid.startswith("fabric-loader-"):
-            json_file = Path(MC_DIR) / "versions" / vid / f"{vid}.json"
+            json_file = MC_DIR / "versions" / vid / f"{vid}.json"
             if json_file.exists():
                 candidates.append((json_file.stat().st_mtime, vid))
     if not candidates:
@@ -91,6 +207,21 @@ def find_newest_fabric():
         )
     candidates.sort()
     return candidates[-1][1]
+
+
+def get_game_version(fabric_id):
+    """Minecraft version a Fabric profile is built for, e.g. 26.3."""
+    json_file = MC_DIR / "versions" / fabric_id / f"{fabric_id}.json"
+    try:
+        parent = json.loads(json_file.read_text(encoding="utf-8")).get("inheritsFrom")
+        if parent:
+            return parent
+    except Exception:
+        pass
+    m = re.match(r"fabric-loader-\d+(?:\.\d+)*-(.+)$", fabric_id)
+    if m:
+        return m.group(1)
+    sys.exit(f"Could not work out the Minecraft version of {fabric_id}.")
 
 
 # ---------- Login ----------
@@ -118,6 +249,16 @@ def main():
     if not LOGIN_JS.exists():
         sys.exit(f"{LOGIN_JS} not found.")
 
+    # A previous run may have been killed before it could put your mods back
+    if MANIFEST.exists():
+        print("Found an unfinished mod swap from an earlier run, restoring your mods first...")
+        if not restore_mods():
+            sys.exit("Could not restore your mods. Close Minecraft and run the launcher again.")
+
+    config = load_config()
+    server = get_server(config)
+    mods = get_mods(config)
+
     node = ensure_node()
     env = node_env(node)
     ensure_packages(node, env)
@@ -138,7 +279,7 @@ def main():
         "username": login["name"],
         "uuid": login["id"],
         "token": login["token"],
-        "quickPlayMultiplayer": SERVER,
+        "quickPlayMultiplayer": server,
         "gameDirectory": str(MC_DIR),
     }
 
@@ -150,12 +291,29 @@ def main():
             options["executablePath"] = mll.runtime.get_executable_path(info["name"], MC_DIR)
     except Exception as e:
         print("Using system Java:", e)
-        
-    print("Installing Mods")
 
     cmd = mll.command.get_minecraft_command(version, MC_DIR, options)
-    print("Starting Minecraft...")
-    subprocess.run(cmd, cwd=MC_DIR)
+
+    swapped = False
+    try:
+        if mods:
+            # 1. Move your own mods away, 2. install the server mods
+            stash_mods()
+            swapped = True
+
+            mc_version = get_game_version(version)
+            print(f"Installing mods for Minecraft {mc_version}...")
+            failed = install_mods(mods, mc_version, MODS_DIR)
+            if failed:
+                print("Warning: some mods could not be installed, starting anyway.")
+
+        print("Starting Minecraft...")
+        subprocess.run(cmd, cwd=MC_DIR)   # returns when the game is closed
+    finally:
+        # 3. Delete the installed mods, 4. move your own mods back
+        if swapped:
+            print("Minecraft closed, restoring your mods...")
+            restore_mods()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+VERSION = "1.0.0"
+
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 

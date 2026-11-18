@@ -1,4 +1,5 @@
 {
+    "version": "1.0.0",
     "ip": "hypixel.net",
     "mods": [
         "https://modrinth.com/mod/clientsort",

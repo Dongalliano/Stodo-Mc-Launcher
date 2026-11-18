@@ -12,7 +12,7 @@ from tkinter import messagebox, ttk
 from PIL import Image, ImageOps, ImageTk
 import minecraft_launcher_lib as mll
 
-from . import updater
+from . import shortcuts, updater
 
 
 ROOT_DIR = (
@@ -689,5 +689,55 @@ class StodoLauncher:
 
 def run(current_version):
     app_root = tk.Tk()
+    app_root.withdraw()
+    try:
+        installation = shortcuts.prepare_installation()
+    except shortcuts.ShortcutError as error:
+        messagebox.showerror("Stodo Mc Launcher", str(error), parent=app_root)
+        app_root.destroy()
+        return
+
+    if installation:
+        executable, newly_installed = installation
+        source_executable = Path(sys.executable)
+        try:
+            subprocess.Popen([str(executable)], cwd=str(executable.parent))
+        except OSError as error:
+            messagebox.showerror(
+                "Stodo Mc Launcher",
+                f"Der installierte Launcher konnte nicht gestartet werden:\n{error}",
+                parent=app_root,
+            )
+            app_root.destroy()
+            return
+
+        removal_error = None
+        try:
+            shortcuts.schedule_source_removal(source_executable, executable)
+        except shortcuts.ShortcutError as error:
+            removal_error = str(error)
+
+        if newly_installed:
+            removal_status = (
+                "Die ursprüngliche Launcher-Datei wird nach dem Schließen gelöscht."
+                if removal_error is None
+                else removal_error
+            )
+            messagebox.showinfo(
+                "Installation abgeschlossen",
+                f"Stodo Mc Launcher wurde hier installiert:\n{executable.parent}\n\n"
+                f"Verknüpfungen wurden auf dem Desktop und im Startmenü erstellt.\n{removal_status}",
+                parent=app_root,
+            )
+        elif removal_error:
+            messagebox.showwarning(
+                "Installation abgeschlossen",
+                removal_error,
+                parent=app_root,
+            )
+        app_root.destroy()
+        return
+
     StodoLauncher(app_root, current_version)
+    app_root.deiconify()
     app_root.mainloop()

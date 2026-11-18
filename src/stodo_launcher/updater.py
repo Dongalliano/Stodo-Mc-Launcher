@@ -137,38 +137,70 @@ def prepare_update(current_version, executable_path, report_status):
 
 
 _UPDATE_SCRIPT = r"""
-param([string]$StagedPath, [string]$TargetPath)
+param([string]$StagedPath, [string]$TargetPath, [switch]$Elevated)
 $ErrorActionPreference = 'Stop'
-$mutex = [System.Threading.Mutex]::new($false, 'Local\StodoMcLauncherUpdater')
+$mutex = $null
 $hasLock = $false
+$result = 0
 try {
-    $hasLock = $mutex.WaitOne(0)
-    if (-not $hasLock) { exit 0 }
-    $processName = [IO.Path]::GetFileNameWithoutExtension($TargetPath)
-    while (Get-Process | Where-Object { $_.ProcessName -eq $processName }) {
-        Start-Sleep -Milliseconds 250
+    if (-not $Elevated) {
+        $mutex = [System.Threading.Mutex]::new($false, 'Local\StodoMcLauncherUpdater')
+        $hasLock = $mutex.WaitOne(0)
+        if (-not $hasLock) { exit 0 }
+        $processName = [IO.Path]::GetFileNameWithoutExtension($TargetPath)
+        while (Get-Process | Where-Object { $_.ProcessName -eq $processName }) {
+            Start-Sleep -Milliseconds 250
+        }
     }
-    try {
+
+    $targetPathFull = [IO.Path]::GetFullPath($TargetPath)
+    $programFilesRoots = @(
+        $env:ProgramW6432,
+        $env:ProgramFiles,
+        ${env:ProgramFiles(x86)}
+    ) | Where-Object { $_ }
+    $requiresElevation = $false
+    foreach ($root in $programFilesRoots) {
+        $rootPath = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+        if ($targetPathFull.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase)) {
+            $requiresElevation = $true
+            break
+        }
+    }
+
+    if (-not $Elevated -and $requiresElevation) {
+        $powershell = Join-Path $PSHOME 'powershell.exe'
+        $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+            $PSCommandPath + '" "' + $StagedPath + '" "' + $TargetPath + '" -Elevated'
+        $process = Start-Process -FilePath $powershell -ArgumentList $arguments `
+            -Verb RunAs -Wait -PassThru
+        if ($process.ExitCode -ne 0) {
+            exit $process.ExitCode
+        }
+    }
+    else {
         $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
         Move-Item -LiteralPath $StagedPath -Destination $TargetPath -Force
         Start-Process -FilePath $TargetPath -WorkingDirectory (Split-Path -Parent $TargetPath)
     }
-    catch {
-        Add-Type -AssemblyName System.Windows.Forms
-        [System.Windows.Forms.MessageBox]::Show(
-            'Das Launcher-Update konnte nicht installiert werden. Bitte prüfe die Schreibrechte des Launcher-Ordners.',
-            'Stodo Mc Launcher'
-        ) | Out-Null
-        if (Test-Path -LiteralPath $TargetPath) {
-            Start-Process -FilePath $TargetPath -WorkingDirectory (Split-Path -Parent $TargetPath)
-        }
+}
+catch {
+    $result = 1
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.MessageBox]::Show(
+        'Das Launcher-Update konnte nicht installiert werden. Bitte prüfe die Schreibrechte des Launcher-Ordners.',
+        'Stodo Mc Launcher'
+    ) | Out-Null
+    if (Test-Path -LiteralPath $TargetPath) {
+        Start-Process -FilePath $TargetPath -WorkingDirectory (Split-Path -Parent $TargetPath)
     }
 }
 finally {
     if ($hasLock) { $mutex.ReleaseMutex() }
-    $mutex.Dispose()
+    if ($mutex) { $mutex.Dispose() }
     Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 }
+if ($result -ne 0) { exit $result }
 """
 
 

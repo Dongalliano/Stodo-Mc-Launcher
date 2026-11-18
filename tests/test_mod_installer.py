@@ -156,6 +156,7 @@ class LauncherTests(unittest.TestCase):
         try:
             script = script_path.read_text(encoding="utf-8-sig")
             self.assertIn("Move-Item -LiteralPath", script)
+            self.assertIn("-Verb RunAs", script)
             self.assertIn("$env:PYINSTALLER_RESET_ENVIRONMENT = '1'", script)
             self.assertIn("Schreibrechte", script)
             self.assertEqual(

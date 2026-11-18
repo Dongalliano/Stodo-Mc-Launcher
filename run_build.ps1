@@ -35,6 +35,7 @@ $required = @(
     (Join-Path $PackageDir "__init__.py"),
     (Join-Path $PackageDir "backend.py"),
     (Join-Path $PackageDir "gui.py"),
+    (Join-Path $PackageDir "shortcuts.py"),
     (Join-Path $PackageDir "mod_installer.py"),
     (Join-Path $PackageDir "updater.py"),
     $BackgroundImage,

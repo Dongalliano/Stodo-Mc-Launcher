@@ -168,9 +168,11 @@ class LauncherTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows-only updater process behavior")
     def test_frozen_updater_clears_the_pyinstaller_dll_directory(self):
         command = []
+        launch_options = {}
 
         def capture_command(arguments, **kwargs):
             command.extend(arguments)
+            launch_options.update(kwargs)
 
         kernel32 = Mock()
         with patch.object(updater.sys, "frozen", True, create=True), patch.object(
@@ -188,6 +190,10 @@ class LauncherTests(unittest.TestCase):
             )
 
         kernel32.SetDllDirectoryW.assert_called_once_with(None)
+        self.assertEqual(
+            launch_options["env"]["PYINSTALLER_RESET_ENVIRONMENT"],
+            "1",
+        )
         Path(command[command.index("-File") + 1]).unlink()
 
     def test_backend_status_updates_the_temporary_status_file(self):
@@ -217,6 +223,27 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(options["state"], "disabled")
         self.assertEqual(options["text"], "SPIEL LÄUFT")
         self.assertEqual(options["bg"], gui.COLORS["disabled"])
+
+    def test_footer_displays_launcher_version_in_the_bottom_right(self):
+        launcher = object.__new__(gui.StodoLauncher)
+        launcher.content = Mock()
+        launcher.current_version = "1.0.2"
+        launcher.state = "Bereit zum Spielen"
+        status_label = Mock()
+        version_label = Mock()
+        with patch.object(gui.tk, "Frame", return_value=Mock()), patch.object(
+            gui.tk, "Canvas", return_value=Mock(),
+        ), patch.object(
+            gui.tk, "Label", side_effect=[status_label, version_label],
+        ) as labels:
+            launcher._make_footer()
+
+        self.assertEqual(labels.call_args_list[1].kwargs["text"], "Version 1.0.2")
+        version_label.pack.assert_called_once_with(
+            side="right",
+            padx=(7, 25),
+            pady=12,
+        )
 
     @unittest.skipUnless(os.name == "nt", "Windows mutex behavior")
     def test_game_mutex_is_detected_and_prevents_a_second_launch(self):

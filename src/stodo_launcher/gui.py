@@ -328,6 +328,11 @@ class StodoLauncher:
             font=("Segoe UI", 9),
         )
         self.status_label.pack(side="left", pady=12)
+        self.version_label = tk.Label(
+            footer, text=f"Version {self.current_version}", fg=COLORS["muted"],
+            bg=COLORS["background"], font=("Segoe UI", 9),
+        )
+        self.version_label.pack(side="right", padx=(7, 25), pady=12)
 
     def _button(self, parent, text, command, bg, hover, fg="white", height=40,
                 width=None, font=("Segoe UI", 9, "bold")):

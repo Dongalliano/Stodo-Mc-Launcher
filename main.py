@@ -1,3 +1,4 @@
+import argparse
 import ctypes
 import json
 import os
@@ -345,7 +346,7 @@ def ensure_packages(node, env):
 
 # ---------- Fabric ----------
 
-def find_newest_fabric():
+def find_newest_fabric(selected_id=None):
     """Return the id of the most recently installed Fabric version."""
     candidates = []
     for v in mll.utils.get_installed_versions(MC_DIR):
@@ -360,6 +361,10 @@ def find_newest_fabric():
             "Install Fabric with the Fabric installer "
             "and start it once from the Minecraft Launcher."
         )
+    if selected_id is not None:
+        if selected_id not in {version_id for _, version_id in candidates}:
+            sys.exit(f"Selected Fabric version is not installed: {selected_id}")
+        return selected_id
     candidates.sort()
     return candidates[-1][1]
 
@@ -400,7 +405,7 @@ def get_login(node, env):
 
 # ---------- Main ----------
 
-def main():
+def main(fabric_version=None):
     if not acquire_single_instance():
         sys.exit("The launcher is already running.")
 
@@ -422,15 +427,16 @@ def main():
     env = node_env(node)
     ensure_packages(node, env)
 
-    version = find_newest_fabric()
-    print(f"Using Fabric version: {version}")
+    fabric_id = find_newest_fabric(fabric_version)
+    mc_version = get_game_version(fabric_id)
+    print(f"Using Fabric version: {fabric_id} (Minecraft {mc_version})")
 
     login = get_login(node, env)
     print(f"Signed in as {login['name']}")
 
     # Makes sure the base game, libraries and assets are present
     try:
-        mll.install.install_minecraft_version(version, MC_DIR)
+        mll.install.install_minecraft_version(fabric_id, MC_DIR)
     except Exception as e:
         print("Install check skipped:", e)
 
@@ -444,14 +450,14 @@ def main():
 
     # Use the Java runtime Mojang specifies for this version
     try:
-        info = mll.runtime.get_version_runtime_information(version, MC_DIR)
+        info = mll.runtime.get_version_runtime_information(fabric_id, MC_DIR)
         if info:
             mll.runtime.install_jvm_runtime(info["name"], MC_DIR)
             options["executablePath"] = mll.runtime.get_executable_path(info["name"], MC_DIR)
     except Exception as e:
         print("Using system Java:", e)
 
-    cmd = mll.command.get_minecraft_command(version, MC_DIR, options)
+    cmd = mll.command.get_minecraft_command(fabric_id, MC_DIR, options)
 
     swapped = False
     try:
@@ -460,7 +466,6 @@ def main():
             stash_mods()
             swapped = True
 
-            mc_version = get_game_version(version)
             print(f"Installing mods for Minecraft {mc_version}...")
             failed = install_mods(mods, mc_version, MODS_DIR)
             if failed:
@@ -481,7 +486,9 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--fabric-version", help="Installed Fabric profile to launch")
+        main(parser.parse_args().fabric_version)
     except SystemExit as e:
         if e.code not in (None, 0):
             report_error(e.code)

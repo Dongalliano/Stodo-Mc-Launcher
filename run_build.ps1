@@ -1,4 +1,4 @@
-# build.ps1 - builds StodoMcLauncher.exe into the "build" folder next to this script.
+# Builds the single-file GUI launcher into the "build" folder.
 # Usage:  powershell -ExecutionPolicy Bypass -File .\run_build.ps1          (build only)
 #         powershell -ExecutionPolicy Bypass -File .\run_build.ps1 -Zip     (build + StodoMcLauncher.zip)
 param([switch]$Zip)
@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 $Root     = $PSScriptRoot
 $BuildDir = Join-Path $Root "build"
 $ExeName  = "StodoMcLauncher"
+$GuiScript = Join-Path $Root "launcher_gui.py"
 $JsDir    = Join-Path $Root "src\js"
 $PyDir    = Join-Path $Root "src\py"
 $ZipPath  = Join-Path $Root "$ExeName.zip"
@@ -33,6 +34,7 @@ if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
 
 $required = @(
     $MainScript,
+    $GuiScript,
     (Join-Path $JsDir "login.js"),
     (Join-Path $JsDir "package.json"),
     (Join-Path $JsDir "package-lock.json"),
@@ -97,31 +99,35 @@ canvas.save(dst, format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (48, 48)
         Write-Host "No launcher_icon.png found, building without a custom icon." -ForegroundColor Yellow
     }
 
-    # ---- Build ----
-    Write-Host "Building $ExeName.exe from $(Split-Path $MainScript -Leaf)..."
-    $pyArgs = @(
+    # ---- Shared PyInstaller options ----
+    $commonPyArgs = @(
         "-m", "PyInstaller",
-        "--noconfirm", "--clean", "--onefile", "--console",
-        "--name", $ExeName,
+        "--noconfirm", "--clean", "--onefile",
         "--distpath", $BuildDir,
-        "--workpath", $WorkDir,
         "--specpath", $WorkDir,
         "--paths", $PyDir,
         "--add-data", "$(Join-Path $JsDir 'login.js');src/js",
         "--add-data", "$(Join-Path $JsDir 'package.json');src/js",
         "--add-data", "$(Join-Path $JsDir 'package-lock.json');src/js",
+        "--add-data", "$MainScript;.",
+        "--hidden-import", "install_mods",
         "--collect-all", "minecraft_launcher_lib"
     )
     if ($Icon) {
-        # Icon of the .exe file itself (Explorer)
-        $pyArgs += @("--icon", $Icon)
-        # Also bundle the icon files so main.py can use them for the window / taskbar icon
-        $pyArgs += @("--add-data", "$Icon;.")
+        $commonPyArgs += @("--icon", $Icon, "--add-data", "$Icon;.")
     }
     if (Test-Path $IconPng) {
-        $pyArgs += @("--add-data", "$IconPng;.")
+        $commonPyArgs += @("--add-data", "$IconPng;.")
     }
-    $pyArgs += $MainScript
+
+    # ---- Build single-file GUI launcher ----
+    $pyArgs = $commonPyArgs + @(
+        "--workpath", $WorkDir,
+        "--noconsole",
+        "--name", $ExeName,
+        $GuiScript
+    )
+    Write-Host "Building $ExeName.exe from $(Split-Path $GuiScript -Leaf)..."
     Run-Py @pyArgs
 
     $exe = Join-Path $BuildDir "$ExeName.exe"
@@ -168,7 +174,7 @@ canvas.save(dst, format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (48, 48)
 
     Write-Host ""
     Get-ChildItem $BuildDir | Format-Table Name, @{ n = "MB"; e = { [math]::Round($_.Length / 1MB, 2) } } -AutoSize
-    Write-Host "Done. Give users the contents of: $BuildDir" -ForegroundColor Green
+    Write-Host "Done. Distribute $ExeName.exe from: $BuildDir" -ForegroundColor Green
 }
 finally {
     # Always remove the temporary files (PyInstaller work files and the converted icon)

@@ -101,7 +101,7 @@ canvas.save(dst, format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (48, 48)
     Write-Host "Building $ExeName.exe from $(Split-Path $MainScript -Leaf)..."
     $pyArgs = @(
         "-m", "PyInstaller",
-        "--noconfirm", "--clean", "--onefile", "--noconsole",
+        "--noconfirm", "--clean", "--onefile", "--console",
         "--name", $ExeName,
         "--distpath", $BuildDir,
         "--workpath", $WorkDir,

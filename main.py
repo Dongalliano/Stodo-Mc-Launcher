@@ -6,8 +6,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 import urllib.request
 from pathlib import Path
+from time import sleep
 
 import minecraft_launcher_lib as mll
 
@@ -31,7 +33,7 @@ PY_PATH = SRC_PATH / "py"
 LOGIN_JS = JS_PATH / "login.js"
 
 
-# ---------- No-console mode (main.pyw / pythonw / exe built with --noconsole) ----------
+# ---------- No-console mode ----------
 
 def _has_console():
     if os.name != "nt":
@@ -61,11 +63,85 @@ def run(cmd, **kwargs):
     return subprocess.run(cmd, **kwargs)
 
 
+_console_hidden = False
+
+
+def _console_root():
+    """Handle of the launcher's own console window (None if there is none)."""
+    if os.name != "nt" or HEADLESS:
+        return None
+    kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.windll.user32
+    kernel32.GetConsoleWindow.restype = ctypes.c_void_p
+    user32.GetAncestor.restype = ctypes.c_void_p
+    user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    hwnd = kernel32.GetConsoleWindow()
+    if not hwnd:
+        return None
+    # In Windows Terminal the console window is a hidden helper,
+    # so use the real top-level window that owns it
+    return user32.GetAncestor(hwnd, 3) or hwnd   # GA_ROOTOWNER
+
+
+def hide_console():
+    """Hide the launcher's console window completely (no window, no taskbar button)."""
+    global _console_hidden
+    try:
+        root = _console_root()
+        if root:
+            user32 = ctypes.windll.user32
+            user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            user32.ShowWindow(root, 0)   # SW_HIDE
+            _console_hidden = True
+    except Exception:
+        pass
+
+
+def show_console():
+    """Bring the console window back (used when something goes wrong after it was hidden)."""
+    global _console_hidden
+    if not _console_hidden:
+        return
+    try:
+        root = _console_root()
+        if root:
+            user32 = ctypes.windll.user32
+            user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            user32.ShowWindow(root, 9)   # SW_RESTORE
+    except Exception:
+        pass
+    _console_hidden = False
+
+
 def show_error(msg):
     try:
         ctypes.windll.user32.MessageBoxW(0, str(msg), "Stodo Mc Launcher", 0x10)
     except Exception:
         pass
+
+
+def wait_for_enter():
+    """Keep the console open until the user presses Enter."""
+    try:
+        print("\nPress Enter to close this window...", flush=True)
+        input()
+    except (EOFError, OSError, RuntimeError):
+        pass
+
+
+def report_error(message, with_traceback=False):
+    """Show an error and wait for Enter, so it can be read before the window closes.
+    Without a console (headless) an error box is shown instead."""
+    show_console()   # brings the window back if it was hidden
+    if HEADLESS:
+        show_error(message)
+        if with_traceback:
+            traceback.print_exc()
+        return
+    if with_traceback:
+        traceback.print_exc()
+    print(f"\nERROR: {message}", file=sys.stderr, flush=True)
+    wait_for_enter()
 
 
 _mutex = None
@@ -132,7 +208,6 @@ def get_server(config):
     ip = config.get("ip")
     if not valid_address(ip):
         sys.exit("server.json on GitHub has no valid 'ip' entry.")
-    print(f"Server from GitHub: {ip}")
     return ip
 
 
@@ -392,23 +467,26 @@ def main():
                 print("Warning: some mods could not be installed, starting anyway.")
 
         print("Starting Minecraft...")
+        sleep(2)
+        hide_console()
         # returns when the game is closed; the game's own log is in .minecraft/logs/latest.log
         run(cmd, cwd=MC_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     finally:
         # 3. Delete the installed mods, 4. move your own mods back
         if swapped:
             print("Minecraft closed, restoring your mods...")
-            restore_mods()
+            if not restore_mods():
+                report_error("Some of your mods could not be restored. Your mods are in: " + str(BACKUP_MODS))
 
 
 if __name__ == "__main__":
     try:
         main()
     except SystemExit as e:
-        if HEADLESS and e.code not in (None, 0):
-            show_error(e.code)
+        if e.code not in (None, 0):
+            report_error(e.code)
+            sys.exit(e.code if isinstance(e.code, int) else 1)
         raise
     except Exception as e:
-        if HEADLESS:
-            show_error(repr(e))
-        raise
+        report_error(repr(e), with_traceback=True)
+        sys.exit(1)

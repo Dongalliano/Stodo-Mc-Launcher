@@ -353,6 +353,122 @@ class LauncherTests(unittest.TestCase):
             ["--disabled-mod-groups", "V"],
         )
 
+    def test_mod_dropdown_hides_group_tags_and_required_checkmarks(self):
+        launcher = gui.StodoLauncher.__new__(gui.StodoLauncher)
+        launcher.root = Mock()
+        launcher.mod_config_error = None
+        launcher.mod_entries = mod_installer.parse_entries([
+            "V https://modrinth.com/mod/voxy",
+            "V1 https://modrinth.com/mod/voxy-worldgen",
+            "https://modrinth.com/mod/lithium",
+        ])
+        launcher.mod_group_vars = {}
+
+        with patch.object(gui.tk, "Label", return_value=Mock()) as label, patch.object(
+            gui.tk, "Frame", return_value=Mock(),
+        ), patch.object(
+            gui.tk, "Checkbutton", return_value=Mock(),
+        ) as checkbutton, patch.object(
+            gui.tk, "BooleanVar", return_value=Mock(),
+        ):
+            launcher._populate_mod_dropdown(Mock())
+
+        self.assertEqual(
+            [call.kwargs["text"] for call in checkbutton.call_args_list],
+            ["Voxy"],
+        )
+        self.assertIn("Lithium", [call.kwargs["text"] for call in label.call_args_list])
+        self.assertFalse(any(
+            call.kwargs.get("text") == "Voxy Worldgen"
+            for call in label.call_args_list
+        ))
+
+    def test_mod_checkbox_does_not_close_dropdown(self):
+        launcher = gui.StodoLauncher.__new__(gui.StodoLauncher)
+        launcher.root = Mock()
+        launcher.mod_config_error = None
+        launcher.mod_entries = mod_installer.parse_entries([
+            "V https://modrinth.com/mod/voxy",
+        ])
+        launcher.mod_group_vars = {}
+        popup = Mock()
+
+        with patch.object(gui.tk, "Label", return_value=Mock()), patch.object(
+            gui.tk, "Frame", return_value=Mock(),
+        ), patch.object(
+            gui.tk, "Checkbutton", return_value=Mock(),
+        ) as checkbutton, patch.object(
+            gui.tk, "BooleanVar", return_value=Mock(),
+        ):
+            launcher._populate_mod_dropdown(Mock())
+
+        checkbutton.assert_called_once()
+        self.assertEqual(
+            checkbutton.call_args.kwargs["command"],
+            launcher._save_mod_preferences,
+        )
+        launcher.mods_popup = popup
+        launcher._toggle_mod_dropdown()
+        popup.destroy.assert_called_once_with()
+        self.assertIsNone(launcher.mods_popup)
+
+    def test_disabled_mod_preferences_restore_and_save_optional_selection(self):
+        entries = mod_installer.parse_entries([
+            "V https://modrinth.com/mod/voxy",
+            "V1 https://modrinth.com/mod/voxy-worldgen",
+        ])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "disabled_mods.json"
+            with patch.dict(os.environ, {"LOCALAPPDATA": temp_dir}):
+                self.assertEqual(
+                    gui.mod_preferences_path(),
+                    Path(temp_dir) / "StodoMcLauncher" / "disabled_mods.json",
+                )
+            gui.save_disabled_mods({"voxy"}, path)
+            disabled_mods = gui.load_disabled_mods(path)
+
+        self.assertEqual(disabled_mods, {"voxy"})
+
+        launcher = gui.StodoLauncher.__new__(gui.StodoLauncher)
+        launcher.root = Mock()
+        launcher.mod_entries = entries
+        launcher.disabled_mods = disabled_mods
+        variable = Mock()
+        variable.get.return_value = False
+        with patch.object(gui.tk, "BooleanVar", return_value=variable) as boolean_var:
+            launcher._initialize_mod_group_vars()
+
+        boolean_var.assert_called_once_with(master=launcher.root, value=False)
+        with patch.object(gui, "save_disabled_mods") as save_preferences:
+            launcher._save_mod_preferences()
+
+        save_preferences.assert_called_once_with({"voxy"})
+
+    def test_open_mod_dropdown_tracks_button_position(self):
+        launcher = gui.StodoLauncher.__new__(gui.StodoLauncher)
+        launcher.root = Mock()
+        launcher.root.winfo_rootx.return_value = 100
+        launcher.root.winfo_rooty.return_value = 20
+        launcher.mods_button = Mock()
+        launcher.mods_button.winfo_rootx.return_value = 300
+        launcher.mods_button.winfo_rooty.return_value = 50
+        launcher.mods_button.winfo_width.return_value = 100
+        launcher.mods_button.winfo_height.return_value = 30
+        launcher.mods_popup = Mock()
+        launcher.mods_popup.winfo_reqwidth.return_value = 200
+
+        launcher._reposition_mod_dropdown()
+        launcher.root.winfo_rootx.return_value = 400
+        launcher.root.winfo_rooty.return_value = 100
+        launcher.mods_button.winfo_rootx.return_value = 600
+        launcher.mods_button.winfo_rooty.return_value = 250
+        launcher._reposition_mod_dropdown(Mock(widget=launcher.root))
+
+        self.assertEqual(
+            [call.kwargs for call in launcher.mods_popup.place.call_args_list],
+            [{"x": 100, "y": 60}, {"x": 100, "y": 180}],
+        )
+
     def test_invalid_entry_is_reported_as_an_error(self):
         with self.assertRaisesRegex(ValueError, "Ungültiger Mod-Eintrag"):
             mod_installer.parse_entries(["bad/mod/path"])

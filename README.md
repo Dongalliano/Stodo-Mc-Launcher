@@ -56,6 +56,7 @@ It contains:
 | `src\js\package-lock.json` | Node.js package lock copied from the executable |
 | `src\js\node_modules\` | `prismarine-auth` and its npm dependencies, installed on first use |
 | `auth-cache\` | Authentication cache created by `prismarine-auth` |
+| `disabled_mods.json` | Optional mod projects disabled in the launcher dropdown |
 
 The authentication cache may contain sensitive sign-in data. Do not share its
 contents. The packaged launcher fetches `server.json` from GitHub at runtime;

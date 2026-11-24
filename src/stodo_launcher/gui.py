@@ -86,6 +86,43 @@ def load_server_mod_entries():
     return mod_installer.parse_entries(mods)
 
 
+def mod_display_name(entry):
+    return entry.project.replace("-", " ").replace("_", " ").title()
+
+
+def mod_preferences_path():
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    base_dir = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+    return base_dir / "StodoMcLauncher" / "disabled_mods.json"
+
+
+def load_disabled_mods(path=None):
+    path = Path(path) if path is not None else mod_preferences_path()
+    if not path.exists():
+        return set()
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise RuntimeError("Die gespeicherten Mod-Einstellungen konnten nicht geladen werden.") from error
+
+    disabled_mods = data.get("disabled_mods") if isinstance(data, dict) else None
+    if not isinstance(disabled_mods, list) or any(
+        not isinstance(project, str) for project in disabled_mods
+    ):
+        raise RuntimeError("Die gespeicherten Mod-Einstellungen sind ungültig.")
+    return {project.lower() for project in disabled_mods}
+
+
+def save_disabled_mods(disabled_mods, path=None):
+    path = Path(path) if path is not None else mod_preferences_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"disabled_mods": sorted(disabled_mods)}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def launch_command(fabric_version, disabled_mod_groups=None):
     if getattr(sys, "frozen", False):
         command = [sys.executable, "--backend", "--fabric-version", fabric_version]
@@ -163,8 +200,13 @@ class StodoLauncher:
         except (RuntimeError, ValueError) as error:
             self.mod_entries = []
             self.mod_config_error = str(error)
-        self.mod_group_vars = {}
-        self._required_mod_vars = []
+        try:
+            self.disabled_mods = load_disabled_mods()
+            self.mod_preferences_error = None
+        except RuntimeError as error:
+            self.disabled_mods = set()
+            self.mod_preferences_error = str(error)
+        self._initialize_mod_group_vars()
         self.game_status_error = False
         try:
             self.game_running = _minecraft_is_running()
@@ -205,6 +247,12 @@ class StodoLauncher:
             self.root.after_idle(lambda: messagebox.showerror(
                 "Modliste konnte nicht geladen werden",
                 self.mod_config_error,
+                parent=self.root,
+            ))
+        if self.mod_preferences_error:
+            self.root.after_idle(lambda: messagebox.showerror(
+                "Mod-Einstellungen konnten nicht geladen werden",
+                self.mod_preferences_error,
                 parent=self.root,
             ))
         if self.update_checking:
@@ -289,65 +337,169 @@ class StodoLauncher:
         tk.Frame(header, bg=COLORS["line"], height=1).pack(side="bottom", fill="x")
 
     def _make_mod_dropdown(self, header):
-        self.mods_button = tk.Menubutton(
+        self.mods_popup = None
+        self.mods_button = tk.Button(
             header,
             text="MODS  ▾",
             fg=COLORS["text"],
             bg=COLORS["panel"],
             activeforeground=COLORS["text"],
             activebackground=COLORS["panel_light"],
-            relief="raised",
+            relief="flat",
             bd=3,
             cursor="hand2",
             font=("Segoe UI", 9, "bold"),
             padx=12,
             pady=6,
+            command=self._toggle_mod_dropdown,
         )
-        self.mods_menu = tk.Menu(
-            self.mods_button,
-            tearoff=False,
-            bg=COLORS["panel"],
-            fg=COLORS["text"],
-            activebackground=COLORS["accent"],
-            activeforeground=COLORS["text"],
-            disabledforeground=COLORS["muted"],
-        )
-        self.mods_button.configure(menu=self.mods_menu)
         self.mods_button.pack(side="right", padx=(10, 24), pady=12)
+        self.root.bind("<Configure>", self._reposition_mod_dropdown, add="+")
+
+    def _initialize_mod_group_vars(self):
+        self.mod_group_vars = {}
+        for entry in self.mod_entries:
+            group = entry.optional_group
+            if group is None or group in self.mod_group_vars:
+                continue
+            disabled = any(
+                candidate.optional_group == group
+                and candidate.project in self.disabled_mods
+                for candidate in self.mod_entries
+            )
+            self.mod_group_vars[group] = tk.BooleanVar(
+                master=self.root,
+                value=not disabled,
+            )
+
+    def _save_mod_preferences(self):
+        disabled_mods = {
+            entry.project for entry in self.mod_entries
+            if entry.optional_group is not None
+            and not self.mod_group_vars[entry.optional_group].get()
+        }
+        self.disabled_mods = disabled_mods
+        try:
+            save_disabled_mods(disabled_mods)
+        except OSError as error:
+            messagebox.showerror(
+                "Mod-Einstellungen konnten nicht gespeichert werden",
+                str(error),
+                parent=self.root,
+            )
+
+    def _toggle_mod_dropdown(self):
+        if self.mods_popup is not None:
+            self.mods_popup.destroy()
+            self.mods_popup = None
+            return
+
+        popup = tk.Frame(
+            self.root,
+            bg=COLORS["panel"],
+            highlightbackground=COLORS["line"],
+            highlightthickness=1,
+        )
+        self._populate_mod_dropdown(popup)
+
+        popup.update_idletasks()
+        self.mods_popup = popup
+        self._reposition_mod_dropdown()
+
+    def _reposition_mod_dropdown(self, event=None):
+        if event is not None and event.widget is not self.root:
+            return
+        if self.mods_popup is None:
+            return
+
+        x = self.mods_button.winfo_rootx() - self.root.winfo_rootx() \
+            + self.mods_button.winfo_width() - self.mods_popup.winfo_reqwidth()
+        y = self.mods_button.winfo_rooty() - self.root.winfo_rooty() \
+            + self.mods_button.winfo_height()
+        self.mods_popup.place(x=max(0, x), y=max(0, y))
+        self.mods_popup.lift()
+
+    def _populate_mod_dropdown(self, panel):
+        tk.Label(
+            panel,
+            text="SERVER MODS",
+            fg=COLORS["muted"],
+            bg=COLORS["panel"],
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            padx=12,
+            pady=8,
+        ).pack(fill="x")
+        tk.Frame(panel, bg=COLORS["line"], height=1).pack(fill="x")
 
         if self.mod_config_error:
-            self.mods_menu.add_command(label="Modliste nicht verfügbar", state="disabled")
-            self.mods_button.configure(state="disabled")
-            return
+            tk.Label(
+                panel,
+                text="Modliste nicht verfügbar",
+                fg=COLORS["muted"],
+                bg=COLORS["panel"],
+                font=("Segoe UI", 10),
+                anchor="w",
+                padx=12,
+                pady=8,
+            ).pack(fill="x")
+        else:
+            visible_entries = [
+                entry for entry in self.mod_entries if entry.addon_for is None
+            ]
+            if not visible_entries:
+                tk.Label(
+                    panel,
+                    text="Keine Mods konfiguriert",
+                    fg=COLORS["muted"],
+                    bg=COLORS["panel"],
+                    font=("Segoe UI", 10),
+                    anchor="w",
+                    padx=12,
+                    pady=8,
+                ).pack(fill="x")
 
-        self.mods_menu.add_command(label="SERVER MODS", state="disabled")
-        self.mods_menu.add_separator()
-        visible_entries = [entry for entry in self.mod_entries if entry.addon_for is None]
-        if not visible_entries:
-            self.mods_menu.add_command(label="Keine Mods konfiguriert", state="disabled")
-            return
+            for entry in visible_entries:
+                display_name = mod_display_name(entry)
+                if entry.optional_group is None:
+                    tk.Label(
+                        panel,
+                        text=display_name,
+                        fg=COLORS["muted"],
+                        bg=COLORS["panel"],
+                        font=("Segoe UI", 10),
+                        anchor="w",
+                        padx=12,
+                        pady=6,
+                    ).pack(fill="x")
+                    continue
 
-        for entry in visible_entries:
-            display_name = entry.project.replace("-", " ").replace("_", " ").title()
-            if entry.optional_group is None:
-                variable = tk.BooleanVar(master=self.root, value=True)
-                self._required_mod_vars.append(variable)
-                self.mods_menu.add_checkbutton(
-                    label=display_name,
+                variable = self.mod_group_vars.get(entry.optional_group)
+                if variable is None:
+                    disabled = any(
+                        candidate.optional_group == entry.optional_group
+                        and candidate.project in getattr(self, "disabled_mods", set())
+                        for candidate in self.mod_entries
+                    )
+                    variable = tk.BooleanVar(master=self.root, value=not disabled)
+                    self.mod_group_vars[entry.optional_group] = variable
+                tk.Checkbutton(
+                    panel,
+                    text=display_name,
                     variable=variable,
-                    state="disabled",
-                )
-                continue
-
-            group = entry.optional_group
-            variable = self.mod_group_vars.get(group)
-            if variable is None:
-                variable = tk.BooleanVar(master=self.root, value=True)
-                self.mod_group_vars[group] = variable
-            self.mods_menu.add_checkbutton(
-                label=f"{display_name}  [{group}]",
-                variable=variable,
-            )
+                    command=self._save_mod_preferences,
+                    fg=COLORS["text"],
+                    bg=COLORS["panel"],
+                    activeforeground=COLORS["text"],
+                    activebackground=COLORS["panel_light"],
+                    selectcolor=COLORS["panel_light"],
+                    relief="flat",
+                    anchor="w",
+                    cursor="hand2",
+                    font=("Segoe UI", 10),
+                    padx=12,
+                    pady=6,
+                ).pack(fill="x")
 
     def _make_home(self):
         home = tk.Frame(self.content, bg=COLORS["background"])

@@ -2,8 +2,8 @@
     "version": "1.0.4",
     "ip": "hypixel.net",
     "mods": [
-        "https://modrinth.com/mod/clientsort",
-        "https://modrinth.com/mod/sound-physics-remastered",
+        "C https://modrinth.com/mod/clientsort",
+        "S https://modrinth.com/mod/sound-physics-remastered",
         "https://modrinth.com/mod/wwaypoints",
         "V https://modrinth.com/mod/voxy",
         "V1 https://modrinth.com/mod/voxy-worldgen",
@@ -14,6 +14,6 @@
         "https://modrinth.com/mod/entityculling",
         "https://modrinth.com/mod/ferrite-core",
         "https://modrinth.com/mod/modmenu",
-        "https://modrinth.com/mod/xaeros-minimap"
+        "X https://modrinth.com/mod/xaeros-minimap"
     ]
 }

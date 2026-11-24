@@ -1,12 +1,12 @@
 """Installs Fabric mods from Modrinth for a given Minecraft version.
 
-Each entry is a Modrinth URL or plain slug, optionally followed by an exact version:
+Each entry is a Modrinth URL or plain slug. A compatible version is selected
+automatically:
     https://modrinth.com/mod/sodium
-    https://modrinth.com/mod/lithium 0.14.3+mc26.3
+    https://modrinth.com/mod/lithium
     modmenu
 
-Required dependencies (e.g. Fabric API) are installed automatically unless
-they are already listed explicitly.
+Required dependencies (e.g. Fabric API) are installed automatically.
 Only needs the Python standard library.
 """
 
@@ -27,7 +27,7 @@ SLUG_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
 def parse_entries(lines):
-    """Return a list of (slug, pinned_version_or_None). '#' lines are ignored."""
+    """Return unique project slugs. '#' lines and trailing text are ignored."""
     entries = []
     seen = set()
 
@@ -38,7 +38,6 @@ def parse_entries(lines):
 
         parts = line.split(None, 1)
         target = parts[0]
-        pin = parts[1].strip() if len(parts) > 1 else None
 
         m = URL_RE.match(target)
         if m:
@@ -52,7 +51,7 @@ def parse_entries(lines):
         if slug in seen:
             continue
         seen.add(slug)
-        entries.append((slug, pin))
+        entries.append(slug)
 
     return entries
 
@@ -66,7 +65,7 @@ def api_get(path, params=None):
         return json.load(resp)
 
 
-def find_version(project, mc_version, pinned=None):
+def find_version(project, mc_version):
     versions = api_get(
         f"/project/{project}/version",
         {
@@ -76,9 +75,6 @@ def find_version(project, mc_version, pinned=None):
     )
     if not versions:
         return None
-
-    if pinned:
-        return next((v for v in versions if v["version_number"] == pinned), None)
 
     # Prefer release > beta > alpha, newest first within each type
     for vtype in ("release", "beta", "alpha"):
@@ -124,50 +120,18 @@ def install_mods(mod_lines, mc_version, out_dir, with_deps=True):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    dependencies = []
-    listed_project_ids = set()
+    queue = deque(entries)
     done = set()
     failed = []
 
-    for project, pin in entries:
-        if project in done:
-            continue
-        done.add(project)
-
-        try:
-            version = find_version(project, mc_version, pin)
-            if version is None:
-                failed.append(project)
-                continue
-
-            download(version, out_dir)
-
-            project_id = version.get("project_id")
-            if project_id:
-                listed_project_ids.add(project_id)
-                done.add(project_id)
-
-            if with_deps:
-                dependencies.extend(version.get("dependencies", []))
-        except Exception:
-            failed.append(project)
-
-    queue = deque(
-        (dep["project_id"], None)
-        for dep in dependencies
-        if dep["dependency_type"] == "required"
-        and dep.get("project_id")
-        and dep["project_id"] not in listed_project_ids
-    )
-
     while queue:
-        project, pin = queue.popleft()
+        project = queue.popleft()
         if project in done:
             continue
         done.add(project)
 
         try:
-            version = find_version(project, mc_version, pin)
+            version = find_version(project, mc_version)
             if version is None:
                 failed.append(project)
                 continue
@@ -177,11 +141,8 @@ def install_mods(mod_lines, mc_version, out_dir, with_deps=True):
             if with_deps:
                 for dep in version.get("dependencies", []):
                     if dep["dependency_type"] == "required" and dep.get("project_id"):
-                        if (
-                            dep["project_id"] not in done
-                            and dep["project_id"] not in listed_project_ids
-                        ):
-                            queue.append((dep["project_id"], None))
+                        if dep["project_id"] not in done:
+                            queue.append(dep["project_id"])
 
         except Exception:
             failed.append(project)

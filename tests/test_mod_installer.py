@@ -288,7 +288,7 @@ class LauncherTests(unittest.TestCase):
             "Lithium 0.14.3",
         ])
 
-        self.assertEqual(entries, [("sodium", None), ("lithium", "0.14.3")])
+        self.assertEqual(entries, ["sodium", "lithium"])
 
     def test_invalid_entry_is_reported_as_an_error(self):
         with self.assertRaisesRegex(ValueError, "Ungültiger Mod-Eintrag"):
@@ -308,23 +308,22 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(failed, ["clientsort"])
         self.assertEqual(output.getvalue(), "")
 
-    def test_explicit_mods_are_not_reinstalled_as_dependencies(self):
+    def test_listed_mod_is_still_queued_as_a_dependency(self):
         versions = {
             "parent": {
                 "project_id": "parent-id",
                 "dependencies": [
                     {"dependency_type": "required", "project_id": "listed-id"},
-                    {"dependency_type": "required", "project_id": "automatic-id"},
                 ],
             },
             "listed-dependency": {"project_id": "listed-id", "dependencies": []},
-            "automatic-id": {"project_id": "automatic-id", "dependencies": []},
+            "listed-id": {"project_id": "listed-id", "dependencies": []},
         }
 
         with tempfile.TemporaryDirectory() as output_dir, patch.object(
             mod_installer,
             "find_version",
-            side_effect=lambda project, _mc_version, _pin: versions[project],
+            side_effect=lambda project, _mc_version: versions[project],
         ) as find_version, patch.object(mod_installer, "download"):
             failed = mod_installer.install_mods(
                 ["parent", "listed-dependency 2.0"],
@@ -335,9 +334,9 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(failed, [])
         self.assertEqual(
             [call.args[0] for call in find_version.call_args_list],
-            ["parent", "listed-dependency", "automatic-id"],
+            ["parent", "listed-dependency", "listed-id"],
         )
-        self.assertEqual(find_version.call_args_list[1].args[2], "2.0")
+        self.assertTrue(all(len(call.args) == 2 for call in find_version.call_args_list))
 
 
 if __name__ == "__main__":

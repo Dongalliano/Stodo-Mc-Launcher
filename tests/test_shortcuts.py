@@ -38,33 +38,50 @@ class ShortcutTests(unittest.TestCase):
             with self.assertRaisesRegex(shortcuts.ShortcutError, "Access denied"):
                 shortcuts.create_shortcuts(Path("StodoMcLauncher.exe"))
 
-    def test_source_removal_waits_for_the_current_process_to_exit(self):
+    def test_install_completion_deletes_before_popup_then_starts_launcher(self):
         source = Path("download") / shortcuts.EXE_NAME
         installed = Path("Program Files") / shortcuts.APP_NAME / shortcuts.EXE_NAME
         with patch.object(shortcuts.shutil, "which", return_value="powershell.exe"), patch.object(
             shortcuts.subprocess, "Popen",
         ) as popen:
-            shortcuts.schedule_source_removal(source, installed)
+            shortcuts.schedule_install_completion(source, installed)
 
         command = popen.call_args.args[0]
         options = popen.call_args.kwargs
-        self.assertIn("Get-Process -Id", command[-1])
-        self.assertIn("Remove-Item -LiteralPath", command[-1])
-        self.assertIn("-Verb RunAs", command[-1])
-        self.assertIn("-EncodedCommand", command[-1])
+        script = command[-1]
+        self.assertIn("Get-Process -Id", script)
+        self.assertIn("Remove-Item -LiteralPath $source", script)
+        self.assertIn("-Verb RunAs", script)
+        self.assertIn("-EncodedCommand", script)
+        self.assertLess(
+            script.index("while (Get-Process"),
+            script.index("Remove-Item -LiteralPath $source"),
+        )
+        self.assertLess(
+            script.index("Remove-Item -LiteralPath $source"),
+            script.index("[System.Windows.Forms.MessageBox]::Show"),
+        )
+        self.assertLess(
+            script.index("[System.Windows.Forms.MessageBox]::Show"),
+            script.index("Start-Process -FilePath $target"),
+        )
         self.assertEqual(
             options["env"]["STODO_LAUNCHER_SOURCE_TO_DELETE"],
             str(source.resolve()),
+        )
+        self.assertEqual(
+            options["env"]["STODO_LAUNCHER_INSTALL_TARGET"],
+            str(installed.resolve()),
         )
         self.assertEqual(
             options["env"]["STODO_LAUNCHER_SOURCE_PROCESS_ID"],
             str(shortcuts.os.getpid()),
         )
 
-    def test_source_removal_never_deletes_the_installed_executable(self):
+    def test_install_completion_is_not_scheduled_for_installed_executable(self):
         installed = Path("Program Files") / shortcuts.APP_NAME / shortcuts.EXE_NAME
         with patch.object(shortcuts.subprocess, "Popen") as popen:
-            shortcuts.schedule_source_removal(installed, installed)
+            shortcuts.schedule_install_completion(installed, installed)
 
         popen.assert_not_called()
 
@@ -142,30 +159,28 @@ class ShortcutTests(unittest.TestCase):
         self.assertIsNone(result)
         create.assert_called_once_with(target)
 
-    def test_success_popup_follows_installation_and_launcher_restart(self):
+    def test_install_handoff_schedules_completion_before_closing_old_launcher(self):
         executable = Path("Program Files") / shortcuts.APP_NAME / shortcuts.EXE_NAME
         root = Mock()
         events = []
-        with patch.object(gui.tk, "Tk", return_value=root), patch.object(
-            gui.shortcuts, "prepare_installation", return_value=(executable, True),
-        ), patch.object(
-            gui.subprocess, "Popen", side_effect=lambda *args, **kwargs: events.append("launch"),
-        ), patch.object(
-            gui.shortcuts,
-            "schedule_source_removal",
-            side_effect=lambda *args, **kwargs: events.append("delete"),
-        ), patch.object(
-            gui.messagebox,
-            "showinfo",
-            side_effect=lambda *args, **kwargs: events.append("popup"),
-        ), patch.object(gui, "StodoLauncher") as launcher:
-            showinfo = gui.messagebox.showinfo
-            gui.run("1.0.4")
+        root.destroy.side_effect = lambda: events.append("old launcher closes")
+        with patch.object(gui.tk, "Tk", return_value=root):
+            with patch.object(
+                gui.shortcuts, "prepare_installation", return_value=(executable, True),
+            ), patch.object(
+                gui.shortcuts,
+                "schedule_install_completion",
+                side_effect=lambda *args, **kwargs: events.append("schedule completion"),
+            ), patch.object(gui.subprocess, "Popen") as launch, patch.object(
+                gui.messagebox, "showinfo",
+            ) as showinfo, patch.object(
+                gui.messagebox, "showerror",
+            ), patch.object(gui, "StodoLauncher") as launcher:
+                gui.run("1.0.4")
 
-        self.assertEqual(events, ["launch", "delete", "popup"])
-        self.assertIn("Installation abgeschlossen", showinfo.call_args.args[0])
-        self.assertIn("Verknüpfungen", showinfo.call_args.args[1])
-        self.assertIn("wird nach dem Schließen gelöscht", showinfo.call_args.args[1])
+        self.assertEqual(events, ["schedule completion", "old launcher closes"])
+        launch.assert_not_called()
+        showinfo.assert_not_called()
         root.withdraw.assert_called_once_with()
         root.destroy.assert_called_once_with()
         launcher.assert_not_called()

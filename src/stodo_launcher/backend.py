@@ -243,13 +243,19 @@ MANIFEST = BACKUP_DIR / "manifest.json"
 # ---------- server.json (read straight from GitHub) ----------
 
 def load_config() -> dict[str, object]:
-    # Read server.json straight from GitHub (in memory, nothing is saved)
-    try:
-        req = urllib.request.Request(SERVER_JSON_URL, headers={"User-Agent": "StodoMcLauncher"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.load(resp)
-    except Exception:
-        sys.exit("Die Serverkonfiguration konnte nicht geladen werden. Prüfe deine Internetverbindung.")
+    local_config = RES_DIR / "server.json"
+    if not FROZEN and local_config.is_file():
+        try:
+            data = json.loads(local_config.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            sys.exit("Die lokale Serverkonfiguration konnte nicht geladen werden.")
+    else:
+        try:
+            req = urllib.request.Request(SERVER_JSON_URL, headers={"User-Agent": "StodoMcLauncher"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.load(resp)
+        except Exception:
+            sys.exit("Die Serverkonfiguration konnte nicht geladen werden. Prüfe deine Internetverbindung.")
     if not isinstance(data, dict):
         sys.exit("Die Serverkonfiguration hat ein ungültiges Format.")
     return data
@@ -450,7 +456,7 @@ def get_login(node, env):
 
 # ---------- Main ----------
 
-def main(fabric_version=None):
+def main(fabric_version=None, disabled_mod_groups=None):
     if not acquire_single_instance():
         sys.exit("Der Launcher ist bereits geöffnet.")
 
@@ -512,7 +518,12 @@ def main(fabric_version=None):
             swapped = True
 
             notify_status("Mods werden installiert ...")
-            failed = install_mods(mods, mc_version, MODS_DIR)
+            failed = install_mods(
+                mods,
+                mc_version,
+                MODS_DIR,
+                disabled_groups=disabled_mod_groups,
+            )
             if failed:
                 sys.exit("Mods konnten nicht installiert werden: " + ", ".join(failed))
 
@@ -539,7 +550,14 @@ def cli(show_errors=True):
     try:
         parser = GermanArgumentParser()
         parser.add_argument("--fabric-version", help="Installiertes Fabric-Profil zum Starten")
-        main(parser.parse_args().fabric_version)
+        parser.add_argument(
+            "--disabled-mod-groups",
+            nargs="*",
+            default=[],
+            help="Optionale Mod-Gruppen, die beim Start ausgelassen werden",
+        )
+        arguments = parser.parse_args()
+        main(arguments.fabric_version, set(arguments.disabled_mod_groups))
         return 0
     except SystemExit as e:
         if e.code not in (None, 0):

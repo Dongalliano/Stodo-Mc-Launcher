@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -287,13 +288,70 @@ class LauncherTests(unittest.TestCase):
             "sodium",
             "Lithium 0.14.3",
             "https://modrinth.com/mod/Iris/version/1.11.7%2B26.3-fabric",
+            "V https://modrinth.com/mod/voxy",
+            "V1 https://modrinth.com/mod/voxy-worldgen",
         ])
 
         self.assertEqual(entries, [
-            ("sodium", "mc26.3-0.9.2-fabric"),
-            ("lithium", "0.14.3"),
-            ("iris", "1.11.7+26.3-fabric"),
+            mod_installer.ModEntry("sodium", "mc26.3-0.9.2-fabric", None, None),
+            mod_installer.ModEntry("lithium", "0.14.3", None, None),
+            mod_installer.ModEntry("iris", "1.11.7+26.3-fabric", None, None),
+            mod_installer.ModEntry("voxy", None, "V", None),
+            mod_installer.ModEntry("voxy-worldgen", None, None, "V"),
         ])
+
+    def test_source_gui_and_backend_use_local_server_mod_tags(self):
+        config = {
+            "ip": "example.org",
+            "mods": [
+                "V https://modrinth.com/mod/voxy",
+                "V1 https://modrinth.com/mod/voxy-worldgen",
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "server.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with patch.object(gui.sys, "frozen", False, create=True), patch.object(
+                gui, "ROOT_DIR", Path(temp_dir),
+            ), patch.object(
+                backend, "FROZEN", False,
+            ), patch.object(
+                backend, "RES_DIR", Path(temp_dir),
+            ):
+                entries = gui.load_server_mod_entries()
+                loaded_config = backend.load_config()
+
+        self.assertEqual(
+            [(entry.project, entry.optional_group, entry.addon_for) for entry in entries],
+            [("voxy", "V", None), ("voxy-worldgen", None, "V")],
+        )
+        self.assertEqual(loaded_config, config)
+
+    def test_disabling_optional_mod_also_filters_its_addons(self):
+        entries = mod_installer.parse_entries([
+            "V https://modrinth.com/mod/voxy",
+            "V1 https://modrinth.com/mod/voxy-worldgen",
+            "https://modrinth.com/mod/lithium",
+        ])
+
+        filtered = mod_installer.filter_mod_entries(entries, {"V"})
+
+        self.assertEqual([entry.project for entry in filtered], ["lithium"])
+        self.assertEqual(
+            [entry.project for entry in mod_installer.filter_mod_entries(entries)],
+            ["voxy", "voxy-worldgen", "lithium"],
+        )
+
+    def test_launch_command_passes_disabled_mod_groups_to_backend(self):
+        with patch.object(gui.sys, "frozen", False, create=True), patch.object(
+            gui, "ROOT_DIR", Path.cwd(),
+        ):
+            command = gui.launch_command("fabric-loader-26.3", {"V"})
+
+        self.assertEqual(
+            command[-2:],
+            ["--disabled-mod-groups", "V"],
+        )
 
     def test_invalid_entry_is_reported_as_an_error(self):
         with self.assertRaisesRegex(ValueError, "Ungültiger Mod-Eintrag"):

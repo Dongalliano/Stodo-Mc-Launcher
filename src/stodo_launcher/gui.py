@@ -1,4 +1,5 @@
 import ctypes
+import json
 import os
 import queue
 import subprocess
@@ -6,13 +7,14 @@ import sys
 import tempfile
 import threading
 import tkinter as tk
+import urllib.request
 from pathlib import Path
 from tkinter import messagebox, ttk
 
 from PIL import Image, ImageOps, ImageTk
 import minecraft_launcher_lib as mll
 
-from . import shortcuts, updater
+from . import mod_installer, shortcuts, updater
 
 
 ROOT_DIR = (
@@ -59,20 +61,49 @@ def get_installed_fabric_versions(game_dir=None):
     return [version for _, version in sorted(versions, reverse=True)]
 
 
-def launch_command(fabric_version):
-    if getattr(sys, "frozen", False):
-        return [sys.executable, "--backend", "--fabric-version", fabric_version]
+def load_server_mod_entries():
+    local_config = ROOT_DIR / "server.json"
+    if not getattr(sys, "frozen", False) and local_config.is_file():
+        try:
+            config = json.loads(local_config.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise RuntimeError("Die lokale Server-Modliste konnte nicht geladen werden.") from error
+    else:
+        request = urllib.request.Request(
+            updater.SERVER_JSON_URL,
+            headers={"User-Agent": "StodoMcLauncher"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                config = json.load(response)
+        except (OSError, TimeoutError, ValueError) as error:
+            raise RuntimeError("Die Server-Modliste konnte nicht geladen werden.") from error
 
-    launcher_script = ROOT_DIR / "main.py"
-    if launcher_script.exists():
-        return [
+    if not isinstance(config, dict) or not isinstance(config.get("mods"), list):
+        raise ValueError("Die Serverkonfiguration enthält keine gültige Mod-Liste.")
+
+    mods = [mod for mod in config["mods"] if isinstance(mod, str)]
+    return mod_installer.parse_entries(mods)
+
+
+def launch_command(fabric_version, disabled_mod_groups=None):
+    if getattr(sys, "frozen", False):
+        command = [sys.executable, "--backend", "--fabric-version", fabric_version]
+    else:
+        launcher_script = ROOT_DIR / "main.py"
+        if not launcher_script.exists():
+            raise FileNotFoundError("Die Startdatei main.py wurde nicht gefunden.")
+        command = [
             sys.executable,
             str(launcher_script),
             "--backend",
             "--fabric-version",
             fabric_version,
         ]
-    raise FileNotFoundError("Die Startdatei main.py wurde nicht gefunden.")
+
+    if disabled_mod_groups:
+        command.extend(["--disabled-mod-groups", *sorted(disabled_mod_groups)])
+    return command
 
 
 def _backend_process_environment(status_file):
@@ -126,6 +157,14 @@ class StodoLauncher:
         self.update_replacement_scheduled = False
         self.last_backend_status = ""
         self.status_file = self._create_status_file()
+        try:
+            self.mod_entries = load_server_mod_entries()
+            self.mod_config_error = None
+        except (RuntimeError, ValueError) as error:
+            self.mod_entries = []
+            self.mod_config_error = str(error)
+        self.mod_group_vars = {}
+        self._required_mod_vars = []
         self.game_status_error = False
         try:
             self.game_running = _minecraft_is_running()
@@ -160,6 +199,12 @@ class StodoLauncher:
             self.root.after_idle(lambda: messagebox.showerror(
                 "Fehler beim Laden",
                 "Die installierten Fabric-Versionen konnten nicht ermittelt werden.",
+                parent=self.root,
+            ))
+        if self.mod_config_error:
+            self.root.after_idle(lambda: messagebox.showerror(
+                "Modliste konnte nicht geladen werden",
+                self.mod_config_error,
                 parent=self.root,
             ))
         if self.update_checking:
@@ -240,7 +285,69 @@ class StodoLauncher:
             header, text="MINECRAFT: JAVA EDITION", fg=COLORS["muted"],
             bg=COLORS["background"], font=("Segoe UI", 9, "bold"),
         ).pack(side="left")
+        self._make_mod_dropdown(header)
         tk.Frame(header, bg=COLORS["line"], height=1).pack(side="bottom", fill="x")
+
+    def _make_mod_dropdown(self, header):
+        self.mods_button = tk.Menubutton(
+            header,
+            text="MODS  ▾",
+            fg=COLORS["text"],
+            bg=COLORS["panel"],
+            activeforeground=COLORS["text"],
+            activebackground=COLORS["panel_light"],
+            relief="raised",
+            bd=3,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+            padx=12,
+            pady=6,
+        )
+        self.mods_menu = tk.Menu(
+            self.mods_button,
+            tearoff=False,
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            activebackground=COLORS["accent"],
+            activeforeground=COLORS["text"],
+            disabledforeground=COLORS["muted"],
+        )
+        self.mods_button.configure(menu=self.mods_menu)
+        self.mods_button.pack(side="right", padx=(10, 24), pady=12)
+
+        if self.mod_config_error:
+            self.mods_menu.add_command(label="Modliste nicht verfügbar", state="disabled")
+            self.mods_button.configure(state="disabled")
+            return
+
+        self.mods_menu.add_command(label="SERVER MODS", state="disabled")
+        self.mods_menu.add_separator()
+        visible_entries = [entry for entry in self.mod_entries if entry.addon_for is None]
+        if not visible_entries:
+            self.mods_menu.add_command(label="Keine Mods konfiguriert", state="disabled")
+            return
+
+        for entry in visible_entries:
+            display_name = entry.project.replace("-", " ").replace("_", " ").title()
+            if entry.optional_group is None:
+                variable = tk.BooleanVar(master=self.root, value=True)
+                self._required_mod_vars.append(variable)
+                self.mods_menu.add_checkbutton(
+                    label=display_name,
+                    variable=variable,
+                    state="disabled",
+                )
+                continue
+
+            group = entry.optional_group
+            variable = self.mod_group_vars.get(group)
+            if variable is None:
+                variable = tk.BooleanVar(master=self.root, value=True)
+                self.mod_group_vars[group] = variable
+            self.mods_menu.add_checkbutton(
+                label=f"{display_name}  [{group}]",
+                variable=variable,
+            )
 
     def _make_home(self):
         home = tk.Frame(self.content, bg=COLORS["background"])
@@ -559,11 +666,22 @@ class StodoLauncher:
             or self.pending_update is not None
         ):
             return
+        if self.mod_config_error:
+            messagebox.showerror(
+                "Modliste nicht verfügbar",
+                self.mod_config_error,
+                parent=self.root,
+            )
+            return
         try:
             selected_version = self.fabric_version.get()
             if selected_version not in self.fabric_versions:
                 raise ValueError("Installiere zuerst ein Fabric-Profil.")
-            command = launch_command(selected_version)
+            disabled_groups = {
+                group for group, variable in self.mod_group_vars.items()
+                if not variable.get()
+            }
+            command = launch_command(selected_version, disabled_groups)
         except (FileNotFoundError, OSError, ValueError) as error:
             message = str(error) if isinstance(error, (FileNotFoundError, ValueError)) else \
                 "Der Launcherprozess konnte nicht gestartet werden."
@@ -698,43 +816,20 @@ def run(current_version):
         return
 
     if installation:
-        executable, newly_installed = installation
+        executable, _newly_installed = installation
         source_executable = Path(sys.executable)
         try:
-            subprocess.Popen([str(executable)], cwd=str(executable.parent))
-        except OSError as error:
-            messagebox.showerror(
-                "Stodo Mc Launcher",
-                f"Der installierte Launcher konnte nicht gestartet werden:\n{error}",
-                parent=app_root,
-            )
-            app_root.destroy()
-            return
-
-        removal_error = None
-        try:
-            shortcuts.schedule_source_removal(source_executable, executable)
+            shortcuts.schedule_install_completion(source_executable, executable)
         except shortcuts.ShortcutError as error:
-            removal_error = str(error)
-
-        if newly_installed:
-            removal_status = (
-                "Die ursprüngliche Launcher-Datei wird nach dem Schließen gelöscht."
-                if removal_error is None
-                else removal_error
-            )
-            messagebox.showinfo(
-                "Installation abgeschlossen",
-                f"Stodo Mc Launcher wurde hier installiert:\n{executable.parent}\n\n"
-                f"Verknüpfungen wurden auf dem Desktop und im Startmenü erstellt.\n{removal_status}",
-                parent=app_root,
-            )
-        elif removal_error:
-            messagebox.showwarning(
-                "Installation abgeschlossen",
-                removal_error,
-                parent=app_root,
-            )
+            messagebox.showerror("Stodo Mc Launcher", str(error), parent=app_root)
+            try:
+                subprocess.Popen([str(executable)], cwd=str(executable.parent))
+            except OSError as start_error:
+                messagebox.showerror(
+                    "Stodo Mc Launcher",
+                    f"Der installierte Launcher konnte nicht gestartet werden:\n{start_error}",
+                    parent=app_root,
+                )
         app_root.destroy()
         return
 

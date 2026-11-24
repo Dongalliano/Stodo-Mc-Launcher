@@ -16,6 +16,7 @@ import re
 import urllib.parse
 import urllib.request
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 
 LOADER = "fabric"
@@ -28,10 +29,19 @@ URL_RE = re.compile(
     re.IGNORECASE,
 )
 SLUG_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+OPTIONAL_PREFIX_RE = re.compile(r"^([A-Z]+)(\d*)$")
+
+
+@dataclass(frozen=True)
+class ModEntry:
+    project: str
+    pinned_version: str | None
+    optional_group: str | None
+    addon_for: str | None
 
 
 def parse_entries(lines):
-    """Return unique (project slug, pinned version) entries."""
+    """Parse mod URLs, optional version pins, and optional/add-on group tags."""
     entries = []
     seen = set()
 
@@ -39,6 +49,20 @@ def parse_entries(lines):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+
+        optional_group = None
+        addon_for = None
+        prefix_parts = line.split(None, 1)
+        if len(prefix_parts) == 2:
+            prefix = OPTIONAL_PREFIX_RE.fullmatch(prefix_parts[0])
+            candidate_url = prefix_parts[1].split(None, 1)[0]
+            if prefix and URL_RE.match(candidate_url):
+                group, addon_number = prefix.groups()
+                if addon_number:
+                    addon_for = group
+                else:
+                    optional_group = group
+                line = prefix_parts[1]
 
         parts = line.split(None, 1)
         target = parts[0]
@@ -61,9 +85,18 @@ def parse_entries(lines):
         if slug in seen:
             continue
         seen.add(slug)
-        entries.append((slug, pin))
+        entries.append(ModEntry(slug, pin, optional_group, addon_for))
 
     return entries
+
+
+def filter_mod_entries(entries, disabled_groups=None):
+    disabled_groups = set(disabled_groups or ())
+    return [
+        entry for entry in entries
+        if entry.optional_group not in disabled_groups
+        and entry.addon_for not in disabled_groups
+    ]
 
 
 def api_get(path, params=None):
@@ -130,9 +163,15 @@ def download(version, out_dir):
     target.write_bytes(data)
 
 
-def install_mods(mod_lines, mc_version, out_dir, with_deps=True):
+def install_mods(
+    mod_lines,
+    mc_version,
+    out_dir,
+    with_deps=True,
+    disabled_groups=None,
+):
     """Install the mods into out_dir. Returns the list of mods that failed."""
-    entries = parse_entries(mod_lines)
+    entries = filter_mod_entries(parse_entries(mod_lines), disabled_groups)
     if not entries:
         return []
 
@@ -144,13 +183,14 @@ def install_mods(mod_lines, mc_version, out_dir, with_deps=True):
     done = set()
     failed = []
 
-    for project, pin in entries:
+    for entry in entries:
+        project = entry.project
         if project in done:
             continue
         done.add(project)
 
         try:
-            version = find_version(project, mc_version, pin)
+            version = find_version(project, mc_version, entry.pinned_version)
             if version is None:
                 project_id = api_get(f"/project/{project}").get("id")
                 if project_id:

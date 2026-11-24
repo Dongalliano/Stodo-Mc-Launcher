@@ -19,8 +19,10 @@ typical 64-bit Windows installation, the full path is:
 C:\Program Files\Stodo Mc Launcher\StodoMcLauncher.exe
 ```
 
-The installed executable is the launcher path used by the shortcuts. The
-original executable is scheduled for deletion after the installed copy starts.
+The installed executable is the launcher path used by the shortcuts. On first
+installation, a helper waits for the original process to exit, removes the
+original executable, shows the completion popup, and starts the installed copy
+after the popup is dismissed.
 When running from the repository, the build output is instead
 `build\StodoMcLauncher.exe`; a source-code run does not install or create
 shortcuts.
@@ -56,8 +58,9 @@ It contains:
 | `auth-cache\` | Authentication cache created by `prismarine-auth` |
 
 The authentication cache may contain sensitive sign-in data. Do not share its
-contents. The launcher fetches `server.json` from GitHub when it runs; it does
-not save that configuration in this folder.
+contents. The packaged launcher fetches `server.json` from GitHub at runtime;
+when running from source, the launcher reads the repository's `server.json`
+when that file is present.
 
 If Node.js is missing, the launcher attempts to install Node.js LTS with
 `winget`. Node.js is managed separately and may be installed under Program

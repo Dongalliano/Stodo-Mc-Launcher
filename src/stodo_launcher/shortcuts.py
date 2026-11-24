@@ -42,41 +42,64 @@ $process = Start-Process -FilePath $env:STODO_LAUNCHER_INSTALL_SOURCE `
 exit $process.ExitCode
 """
 
-_DELETE_SOURCE_SCRIPT = r"""
+_INSTALL_COMPLETION_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
 $source = $env:STODO_LAUNCHER_SOURCE_TO_DELETE
+$target = $env:STODO_LAUNCHER_INSTALL_TARGET
 $processId = [int]$env:STODO_LAUNCHER_SOURCE_PROCESS_ID
 while (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
     Start-Sleep -Milliseconds 250
 }
+$removalStatus = 'Die ursprüngliche Launcher-Datei wurde gelöscht.'
 try {
     if (Test-Path -LiteralPath $source) {
-        Remove-Item -LiteralPath $source -Force -ErrorAction Stop
+        try {
+            Remove-Item -LiteralPath $source -Force -ErrorAction Stop
+        }
+        catch {
+            $sourceLiteral = "'" + $source.Replace("'", "''") + "'"
+            $deleteCommand = '$ErrorActionPreference = ''Stop''; Remove-Item -LiteralPath ' +
+                $sourceLiteral + ' -Force -ErrorAction Stop'
+            $encodedCommand = [Convert]::ToBase64String(
+                [Text.Encoding]::Unicode.GetBytes($deleteCommand)
+            )
+            $powershell = Join-Path $PSHOME 'powershell.exe'
+            $process = Start-Process -FilePath $powershell `
+                -ArgumentList "-NoProfile -NonInteractive -EncodedCommand $encodedCommand" `
+                -Verb RunAs -Wait -PassThru -WindowStyle Hidden
+            if ($process.ExitCode -ne 0) {
+                throw 'Die Löschung mit Administratorrechten ist fehlgeschlagen.'
+            }
+        }
     }
 }
 catch {
-    try {
-        $sourceLiteral = "'" + $source.Replace("'", "''") + "'"
-        $deleteCommand = '$ErrorActionPreference = ''Stop''; Remove-Item -LiteralPath ' +
-            $sourceLiteral + ' -Force -ErrorAction Stop'
-        $encodedCommand = [Convert]::ToBase64String(
-            [Text.Encoding]::Unicode.GetBytes($deleteCommand)
-        )
-        $powershell = Join-Path $PSHOME 'powershell.exe'
-        $process = Start-Process -FilePath $powershell `
-            -ArgumentList "-NoProfile -NonInteractive -EncodedCommand $encodedCommand" `
-            -Verb RunAs -Wait -PassThru -WindowStyle Hidden
-        if ($process.ExitCode -ne 0) {
-            throw 'Die Löschung mit Administratorrechten ist fehlgeschlagen.'
-        }
-    }
-    catch {
-        Add-Type -AssemblyName System.Windows.Forms
-        [System.Windows.Forms.MessageBox]::Show(
-            "Die ursprüngliche Launcher-Datei konnte nicht gelöscht werden:`n" + $_.Exception.Message,
-            'Stodo Mc Launcher'
-        ) | Out-Null
-    }
+    $removalStatus = "Die ursprüngliche Launcher-Datei konnte nicht gelöscht werden:`n" +
+        $_.Exception.Message
+}
+
+Add-Type -AssemblyName System.Windows.Forms
+$message = "Stodo Mc Launcher wurde hier installiert:`n" +
+    (Split-Path -Parent $target) +
+    "`n`nVerknüpfungen wurden auf dem Desktop und im Startmenü erstellt.`n" +
+    $removalStatus
+[System.Windows.Forms.MessageBox]::Show(
+    $message,
+    'Installation abgeschlossen',
+    [System.Windows.Forms.MessageBoxButtons]::OK,
+    [System.Windows.Forms.MessageBoxIcon]::Information
+) | Out-Null
+
+try {
+    Start-Process -FilePath $target -WorkingDirectory (Split-Path -Parent $target)
+}
+catch {
+    [System.Windows.Forms.MessageBox]::Show(
+        "Der installierte Launcher konnte nicht gestartet werden:`n" + $_.Exception.Message,
+        'Stodo Mc Launcher',
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Error
+    ) | Out-Null
 }
 """
 
@@ -176,7 +199,7 @@ def _install_with_elevation(target: Path) -> None:
     _run_powershell(_ELEVATED_COPY_SCRIPT, environment)
 
 
-def schedule_source_removal(source: Path, installed_executable: Path) -> None:
+def schedule_install_completion(source: Path, installed_executable: Path) -> None:
     if _same_path(source, installed_executable):
         return
 
@@ -188,6 +211,7 @@ def schedule_source_removal(source: Path, installed_executable: Path) -> None:
 
     environment = os.environ.copy()
     environment["STODO_LAUNCHER_SOURCE_TO_DELETE"] = str(source.resolve())
+    environment["STODO_LAUNCHER_INSTALL_TARGET"] = str(installed_executable.resolve())
     environment["STODO_LAUNCHER_SOURCE_PROCESS_ID"] = str(os.getpid())
     try:
         subprocess.Popen(
@@ -198,7 +222,7 @@ def schedule_source_removal(source: Path, installed_executable: Path) -> None:
                 "-WindowStyle",
                 "Hidden",
                 "-Command",
-                _DELETE_SOURCE_SCRIPT,
+                _INSTALL_COMPLETION_SCRIPT,
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -208,7 +232,7 @@ def schedule_source_removal(source: Path, installed_executable: Path) -> None:
         )
     except OSError as error:
         raise ShortcutError(
-            f"Die ursprüngliche Launcher-Datei konnte nicht zur Löschung vorgemerkt werden: {error}"
+            f"Der Installationsabschluss konnte nicht gestartet werden: {error}"
         ) from error
 
 

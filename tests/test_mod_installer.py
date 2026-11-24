@@ -446,27 +446,30 @@ class LauncherTests(unittest.TestCase):
 
     def test_open_mod_dropdown_tracks_button_position(self):
         launcher = gui.StodoLauncher.__new__(gui.StodoLauncher)
-        launcher.root = Mock()
-        launcher.root.winfo_rootx.return_value = 100
-        launcher.root.winfo_rooty.return_value = 20
+        launcher.mods_header = Mock()
+        launcher.mods_header.after_idle.side_effect = lambda callback: callback()
         launcher.mods_button = Mock()
-        launcher.mods_button.winfo_rootx.return_value = 300
-        launcher.mods_button.winfo_rooty.return_value = 50
+        launcher.mods_button.winfo_x.return_value = 300
+        launcher.mods_button.winfo_y.return_value = 50
         launcher.mods_button.winfo_width.return_value = 100
         launcher.mods_button.winfo_height.return_value = 30
         launcher.mods_popup = Mock()
         launcher.mods_popup.winfo_reqwidth.return_value = 200
 
         launcher._reposition_mod_dropdown()
-        launcher.root.winfo_rootx.return_value = 400
-        launcher.root.winfo_rooty.return_value = 100
-        launcher.mods_button.winfo_rootx.return_value = 600
-        launcher.mods_button.winfo_rooty.return_value = 250
-        launcher._reposition_mod_dropdown(Mock(widget=launcher.root))
+        launcher.mods_button.winfo_x.return_value = 600
+        launcher.mods_button.winfo_y.return_value = 250
+        launcher._reposition_mod_dropdown(Mock(widget=launcher.mods_header))
 
         self.assertEqual(
             [call.kwargs for call in launcher.mods_popup.place.call_args_list],
-            [{"x": 100, "y": 60}, {"x": 100, "y": 180}],
+            [
+                {"in_": launcher.mods_header, "x": 200, "y": 80},
+                {"in_": launcher.mods_header, "x": 500, "y": 280},
+            ],
+        )
+        launcher.mods_header.after_idle.assert_called_once_with(
+            launcher._reposition_mod_dropdown,
         )
 
     def test_invalid_entry_is_reported_as_an_error(self):

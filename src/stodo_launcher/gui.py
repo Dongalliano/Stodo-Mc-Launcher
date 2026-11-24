@@ -338,6 +338,7 @@ class StodoLauncher:
 
     def _make_mod_dropdown(self, header):
         self.mods_popup = None
+        self.mods_header = header
         self.mods_button = tk.Button(
             header,
             text="MODS  ▾",
@@ -354,7 +355,7 @@ class StodoLauncher:
             command=self._toggle_mod_dropdown,
         )
         self.mods_button.pack(side="right", padx=(10, 24), pady=12)
-        self.root.bind("<Configure>", self._reposition_mod_dropdown, add="+")
+        header.bind("<Configure>", self._reposition_mod_dropdown, add="+")
 
     def _initialize_mod_group_vars(self):
         self.mod_group_vars = {}
@@ -395,7 +396,7 @@ class StodoLauncher:
             return
 
         popup = tk.Frame(
-            self.root,
+            self.content,
             bg=COLORS["panel"],
             highlightbackground=COLORS["line"],
             highlightthickness=1,
@@ -407,16 +408,18 @@ class StodoLauncher:
         self._reposition_mod_dropdown()
 
     def _reposition_mod_dropdown(self, event=None):
-        if event is not None and event.widget is not self.root:
+        if event is not None and event.widget is not self.mods_header:
+            return
+        if event is not None:
+            self.mods_header.after_idle(self._reposition_mod_dropdown)
             return
         if self.mods_popup is None:
             return
 
-        x = self.mods_button.winfo_rootx() - self.root.winfo_rootx() \
-            + self.mods_button.winfo_width() - self.mods_popup.winfo_reqwidth()
-        y = self.mods_button.winfo_rooty() - self.root.winfo_rooty() \
-            + self.mods_button.winfo_height()
-        self.mods_popup.place(x=max(0, x), y=max(0, y))
+        x = self.mods_button.winfo_x() + self.mods_button.winfo_width() \
+            - self.mods_popup.winfo_reqwidth()
+        y = self.mods_button.winfo_y() + self.mods_button.winfo_height()
+        self.mods_popup.place(in_=self.mods_header, x=max(0, x), y=y)
         self.mods_popup.lift()
 
     def _populate_mod_dropdown(self, panel):

@@ -308,6 +308,37 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(failed, ["clientsort"])
         self.assertEqual(output.getvalue(), "")
 
+    def test_explicit_mods_are_not_reinstalled_as_dependencies(self):
+        versions = {
+            "parent": {
+                "project_id": "parent-id",
+                "dependencies": [
+                    {"dependency_type": "required", "project_id": "listed-id"},
+                    {"dependency_type": "required", "project_id": "automatic-id"},
+                ],
+            },
+            "listed-dependency": {"project_id": "listed-id", "dependencies": []},
+            "automatic-id": {"project_id": "automatic-id", "dependencies": []},
+        }
+
+        with tempfile.TemporaryDirectory() as output_dir, patch.object(
+            mod_installer,
+            "find_version",
+            side_effect=lambda project, _mc_version, _pin: versions[project],
+        ) as find_version, patch.object(mod_installer, "download"):
+            failed = mod_installer.install_mods(
+                ["parent", "listed-dependency 2.0"],
+                "1.21.1",
+                Path(output_dir),
+            )
+
+        self.assertEqual(failed, [])
+        self.assertEqual(
+            [call.args[0] for call in find_version.call_args_list],
+            ["parent", "listed-dependency", "automatic-id"],
+        )
+        self.assertEqual(find_version.call_args_list[1].args[2], "2.0")
+
 
 if __name__ == "__main__":
     unittest.main()

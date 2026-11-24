@@ -5,7 +5,8 @@ Each entry is a Modrinth URL or plain slug, optionally followed by an exact vers
     https://modrinth.com/mod/lithium 0.14.3+mc26.3
     modmenu
 
-Required dependencies (e.g. Fabric API) are installed automatically.
+Required dependencies (e.g. Fabric API) are installed automatically unless
+they are already listed explicitly.
 Only needs the Python standard library.
 """
 
@@ -123,9 +124,41 @@ def install_mods(mod_lines, mc_version, out_dir, with_deps=True):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    queue = deque(entries)
+    dependencies = []
+    listed_project_ids = set()
     done = set()
     failed = []
+
+    for project, pin in entries:
+        if project in done:
+            continue
+        done.add(project)
+
+        try:
+            version = find_version(project, mc_version, pin)
+            if version is None:
+                failed.append(project)
+                continue
+
+            download(version, out_dir)
+
+            project_id = version.get("project_id")
+            if project_id:
+                listed_project_ids.add(project_id)
+                done.add(project_id)
+
+            if with_deps:
+                dependencies.extend(version.get("dependencies", []))
+        except Exception:
+            failed.append(project)
+
+    queue = deque(
+        (dep["project_id"], None)
+        for dep in dependencies
+        if dep["dependency_type"] == "required"
+        and dep.get("project_id")
+        and dep["project_id"] not in listed_project_ids
+    )
 
     while queue:
         project, pin = queue.popleft()
@@ -144,7 +177,10 @@ def install_mods(mod_lines, mc_version, out_dir, with_deps=True):
             if with_deps:
                 for dep in version.get("dependencies", []):
                     if dep["dependency_type"] == "required" and dep.get("project_id"):
-                        if dep["project_id"] not in done:
+                        if (
+                            dep["project_id"] not in done
+                            and dep["project_id"] not in listed_project_ids
+                        ):
                             queue.append((dep["project_id"], None))
 
         except Exception:

@@ -283,12 +283,17 @@ class LauncherTests(unittest.TestCase):
 
     def test_parse_entries_normalizes_slugs_and_removes_duplicates(self):
         entries = mod_installer.parse_entries([
-            "https://modrinth.com/mod/Sodium",
+            "https://modrinth.com/mod/Sodium/version/mc26.3-0.9.2-fabric",
             "sodium",
             "Lithium 0.14.3",
+            "https://modrinth.com/mod/Iris/version/1.11.7%2B26.3-fabric",
         ])
 
-        self.assertEqual(entries, ["sodium", "lithium"])
+        self.assertEqual(entries, [
+            ("sodium", "mc26.3-0.9.2-fabric"),
+            ("lithium", "0.14.3"),
+            ("iris", "1.11.7+26.3-fabric"),
+        ])
 
     def test_invalid_entry_is_reported_as_an_error(self):
         with self.assertRaisesRegex(ValueError, "Ungültiger Mod-Eintrag"):
@@ -308,7 +313,59 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(failed, ["clientsort"])
         self.assertEqual(output.getvalue(), "")
 
-    def test_listed_mod_is_still_queued_as_a_dependency(self):
+    def test_find_version_matches_exact_version_number_or_id(self):
+        versions = [
+            {"id": "version-id-1", "version_number": "1.0.0"},
+            {"id": "version-id-2", "version_number": "2.0.0"},
+        ]
+        with patch.object(mod_installer, "api_get", return_value=versions):
+            self.assertEqual(
+                mod_installer.find_version("project", "1.21.1", "2.0.0"),
+                versions[1],
+            )
+            self.assertEqual(
+                mod_installer.find_version("project", "1.21.1", "version-id-1"),
+                versions[0],
+            )
+
+    def test_listed_dependency_is_not_installed_automatically(self):
+        versions = {
+            "parent": {
+                "project_id": "parent-id",
+                "dependencies": [
+                    {"dependency_type": "required", "project_id": "listed-id"},
+                    {"dependency_type": "required", "project_id": "automatic-id"},
+                ],
+            },
+            "listed-dependency": {"project_id": "listed-id", "dependencies": []},
+            "automatic-id": {"project_id": "automatic-id", "dependencies": []},
+        }
+
+        with tempfile.TemporaryDirectory() as output_dir, patch.object(
+            mod_installer,
+            "find_version",
+            side_effect=lambda project, _mc_version, _pin=None: versions[project],
+        ) as find_version, patch.object(mod_installer, "download"):
+            failed = mod_installer.install_mods(
+                [
+                    "parent",
+                    "https://modrinth.com/mod/listed-dependency/version/2.0",
+                ],
+                "1.21.1",
+                Path(output_dir),
+            )
+
+        self.assertEqual(failed, [])
+        self.assertEqual(
+            [call.args for call in find_version.call_args_list],
+            [
+                ("parent", "1.21.1", None),
+                ("listed-dependency", "1.21.1", "2.0"),
+                ("automatic-id", "1.21.1"),
+            ],
+        )
+
+    def test_listed_dependency_is_not_queued_when_its_pin_is_unavailable(self):
         versions = {
             "parent": {
                 "project_id": "parent-id",
@@ -316,27 +373,31 @@ class LauncherTests(unittest.TestCase):
                     {"dependency_type": "required", "project_id": "listed-id"},
                 ],
             },
-            "listed-dependency": {"project_id": "listed-id", "dependencies": []},
-            "listed-id": {"project_id": "listed-id", "dependencies": []},
         }
 
         with tempfile.TemporaryDirectory() as output_dir, patch.object(
             mod_installer,
             "find_version",
-            side_effect=lambda project, _mc_version: versions[project],
-        ) as find_version, patch.object(mod_installer, "download"):
+            side_effect=lambda project, _mc_version, _pin=None: versions.get(project),
+        ) as find_version, patch.object(
+            mod_installer,
+            "api_get",
+            return_value={"id": "listed-id"},
+        ), patch.object(mod_installer, "download"):
             failed = mod_installer.install_mods(
-                ["parent", "listed-dependency 2.0"],
+                [
+                    "parent",
+                    "https://modrinth.com/mod/listed-dependency/version/missing",
+                ],
                 "1.21.1",
                 Path(output_dir),
             )
 
-        self.assertEqual(failed, [])
+        self.assertEqual(failed, ["listed-dependency"])
         self.assertEqual(
             [call.args[0] for call in find_version.call_args_list],
-            ["parent", "listed-dependency", "listed-id"],
+            ["parent", "listed-dependency"],
         )
-        self.assertTrue(all(len(call.args) == 2 for call in find_version.call_args_list))
 
 
 if __name__ == "__main__":

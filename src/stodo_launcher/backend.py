@@ -14,6 +14,7 @@ import minecraft_launcher_lib as mll
 from minecraft_launcher_lib.types import MinecraftOptions
 
 from .mod_installer import install_mods
+from .single_instance import acquire_single_instance as _acquire_named_mutex
 
 # ---------- Where things live ----------
 
@@ -34,6 +35,7 @@ JS_PATH = SRC_PATH / "js"
 LOGIN_JS = JS_PATH / "login.js"
 STATUS_FILE_ENV = "STODO_LAUNCHER_STATUS_FILE"
 GAME_MUTEX_NAME = "Local\\StodoMcLauncherGame"
+BACKEND_MUTEX_NAME = "Local\\StodoMcLauncherBackend"
 
 
 # ---------- No-console mode ----------
@@ -208,13 +210,10 @@ _mutex = None
 
 
 def acquire_single_instance():
-    """Only one launcher at a time, otherwise two mod swaps would collide."""
+    """Prevent concurrent backend launches without conflicting with the GUI lock."""
     global _mutex
-    if os.name != "nt":
-        return True
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _mutex = kernel32.CreateMutexW(None, False, "Local\\StodoMcLauncher")
-    return ctypes.get_last_error() != 183   # 183 = ERROR_ALREADY_EXISTS
+    _mutex = _acquire_named_mutex(BACKEND_MUTEX_NAME)
+    return _mutex is not None
 
 
 def sync_resources():
@@ -532,7 +531,7 @@ def main(fabric_version=None, disabled_mod_groups=None):
         hide_console()
         game_process = start_game(cmd)
         notify_status("Minecraft läuft")
-        game_process.wait()
+        return game_process.wait()
     finally:
         try:
             # 3. Delete the installed mods, 4. move your own mods back
@@ -557,26 +556,25 @@ def cli(show_errors=True):
             help="Optionale Mod-Gruppen, die beim Start ausgelassen werden",
         )
         arguments = parser.parse_args()
-        main(arguments.fabric_version, set(arguments.disabled_mod_groups))
-        return 0
+        return main(arguments.fabric_version, set(arguments.disabled_mod_groups)) or 0
     except SystemExit as e:
         if e.code not in (None, 0):
             if show_errors:
                 message = e.code if isinstance(e.code, str) else "Der Launcher wurde mit einem Fehler beendet."
                 report_error(message)
+            elif isinstance(e.code, str):
+                notify_status("Fehler: " + e.code)
+            else:
+                notify_status("Fehler: Der Launcher wurde mit einem Fehler beendet.")
             return e.code if isinstance(e.code, int) else 1
         return 0
-    except Exception:
+    except Exception as error:
+        message = str(error).strip() or "Ein unerwarteter Fehler ist aufgetreten."
         if show_errors:
             report_error(
                 "Ein unerwarteter Fehler ist aufgetreten. Prüfe deine "
                 "Internetverbindung und die Minecraft-Installation."
             )
+        else:
+            notify_status("Fehler: " + message)
         return 1
-    finally:
-        status_file = os.environ.get(STATUS_FILE_ENV)
-        if status_file:
-            try:
-                Path(status_file).unlink()
-            except FileNotFoundError:
-                pass

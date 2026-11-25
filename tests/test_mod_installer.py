@@ -210,6 +210,12 @@ class LauncherTests(unittest.TestCase):
 
             self.assertEqual(status_file.read_text(encoding="utf-8"), "Node.js ist installiert")
 
+    def test_backend_uses_a_distinct_single_instance_mutex(self):
+        with patch.object(backend, "_acquire_named_mutex", return_value=123) as acquire:
+            self.assertTrue(backend.acquire_single_instance())
+
+        acquire.assert_called_once_with(backend.BACKEND_MUTEX_NAME)
+
     def test_play_button_is_gray_and_disabled_while_game_is_running(self):
         launcher = object.__new__(gui.StodoLauncher)
         launcher.game_running = True

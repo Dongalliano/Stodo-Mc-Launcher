@@ -978,7 +978,12 @@ class StodoLauncher:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             self.events.put(("started", process))
-            self.events.put(("exited", process.wait()))
+            return_code = process.wait()
+            try:
+                backend_status = self.status_file.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                backend_status = ""
+            self.events.put(("exited", (return_code, backend_status)))
         except OSError:
             self.events.put(("error", "Der Launcherprozess konnte nicht gestartet werden."))
 
@@ -1000,14 +1005,19 @@ class StodoLauncher:
                 self.fabric_picker.configure(
                     state="readonly" if self.fabric_versions else "disabled",
                 )
-                if value == 0:
+                if isinstance(value, tuple):
+                    return_code, backend_status = value
+                else:
+                    return_code, backend_status = value, ""
+                if return_code == 0:
                     if not self.game_running:
                         self._set_status("Bereit zum Spielen")
                 else:
                     self._set_status("Beim Start ist ein Fehler aufgetreten.", COLORS["danger"])
+                    detail = backend_status[len("Fehler: "):] if backend_status.startswith("Fehler: ") else ""
                     messagebox.showerror(
                         "Startfehler",
-                        "Minecraft konnte nicht gestartet werden. Bitte versuche es erneut.",
+                        detail or "Minecraft konnte nicht gestartet werden. Bitte versuche es erneut.",
                         parent=self.root,
                     )
             elif kind == "error":

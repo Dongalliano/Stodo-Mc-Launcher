@@ -25,7 +25,8 @@ original executable, shows the completion popup, and starts the installed copy
 after the popup is dismissed.
 When running from the repository, the build output is instead
 `build\StodoMcLauncher.exe`; a source-code run does not install or create
-shortcuts.
+shortcuts. Only one GUI launcher instance can run at a time; starting it again
+while it is open exits without opening another window.
 
 ## Shortcuts
 

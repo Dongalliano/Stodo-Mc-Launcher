@@ -17,6 +17,12 @@ if "--backend" in sys.argv:
 
     raise SystemExit(cli(show_errors=False))
 
+from stodo_launcher.single_instance import acquire_single_instance
+
+_single_instance_handle = acquire_single_instance()
+if _single_instance_handle is None:
+    raise SystemExit(0)
+
 from stodo_launcher.gui import run
 
 

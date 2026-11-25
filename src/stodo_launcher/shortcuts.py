@@ -103,6 +103,107 @@ catch {
 }
 """
 
+_UNINSTALL_SCRIPT = r"""
+param(
+    [switch]$Elevated,
+    [Parameter(Mandatory = $true)][string]$InstallDirectory,
+    [Parameter(Mandatory = $true)][string]$DataDirectory,
+    [Parameter(Mandatory = $true)][int]$LauncherProcessId
+)
+$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath ([IO.Path]::GetTempPath())
+
+function Show-UninstallMessage($Message, $Title, $Icon) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $iconValue = [Enum]::Parse([System.Windows.Forms.MessageBoxIcon], $Icon)
+    [System.Windows.Forms.MessageBox]::Show(
+        $Message,
+        $Title,
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        $iconValue
+    ) | Out-Null
+}
+
+try {
+    while (Get-Process -Id $LauncherProcessId -ErrorAction SilentlyContinue) {
+        Start-Sleep -Milliseconds 250
+    }
+
+    $programFilesRoots = @(
+        $env:ProgramW6432,
+        $env:ProgramFiles,
+        ${env:ProgramFiles(x86)}
+    ) | Where-Object { $_ }
+    $requiresElevation = $false
+    foreach ($root in $programFilesRoots) {
+        $rootPath = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+        $installPath = [IO.Path]::GetFullPath($installDirectory).TrimEnd('\') + '\'
+        if ($installPath.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase)) {
+            $requiresElevation = $true
+            break
+        }
+    }
+
+    if ($requiresElevation -and -not $Elevated) {
+        $powershell = Join-Path $PSHOME 'powershell.exe'
+        $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass ' +
+            '-File "' + $PSCommandPath + '" -Elevated -InstallDirectory "' +
+            $InstallDirectory + '" -DataDirectory "' + $DataDirectory +
+            '" -LauncherProcessId ' + $LauncherProcessId
+        $process = Start-Process -FilePath $powershell -ArgumentList $arguments `
+            -Verb RunAs -Wait -PassThru -WorkingDirectory ([IO.Path]::GetTempPath())
+        if ($process.ExitCode -ne 0) {
+            exit $process.ExitCode
+        }
+        exit 0
+    }
+
+    $targets = @(
+        $InstallDirectory,
+        $DataDirectory,
+        (Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Stodo Mc Launcher.lnk'),
+        (Join-Path ([Environment]::GetFolderPath('Programs')) 'Stodo Mc Launcher.lnk')
+    )
+    $failures = @()
+    foreach ($target in $targets) {
+        if (-not $target -or -not (Test-Path -LiteralPath $target)) {
+            continue
+        }
+        try {
+            Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+        }
+        catch {
+            $failures += "$target`: $($_.Exception.Message)"
+        }
+    }
+
+    if ($failures.Count -gt 0) {
+        Show-UninstallMessage (
+            "Einige Launcher-Dateien konnten nicht gelöscht werden:`n`n" +
+            ($failures -join "`n")
+        ) 'Deinstallation unvollständig' 'Error'
+        exit 1
+    }
+
+    Show-UninstallMessage (
+        "Stodo Mc Launcher und seine lokalen Daten wurden gelöscht. " +
+        "Minecraft-Dateien, Mods und Welten bleiben erhalten."
+    ) 'Deinstallation abgeschlossen' 'Information'
+}
+catch {
+    Show-UninstallMessage (
+        "Stodo Mc Launcher konnte nicht vollständig deinstalliert werden:`n`n" +
+        $_.Exception.Message
+    ) 'Deinstallation fehlgeschlagen' 'Error'
+    exit 1
+}
+finally {
+    if (-not $Elevated -and $PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
+        Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+    }
+}
+"""
+
 
 def _run_powershell(script: str, environment: dict[str, str]) -> None:
     powershell = shutil.which("powershell.exe")
@@ -251,3 +352,67 @@ def prepare_installation() -> tuple[Path, bool] | None:
         _install_with_elevation(target)
     create_shortcuts(target)
     return target, newly_installed
+
+
+def schedule_uninstall() -> None:
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        raise ShortcutError("Die Deinstallation ist nur für die installierte Windows-Version verfügbar.")
+
+    target = installation_path()
+    if not _same_path(Path(sys.executable), target):
+        raise ShortcutError("Der Launcher läuft nicht aus seinem Installationsordner.")
+
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        raise ShortcutError("Windows PowerShell wurde nicht gefunden. Die Deinstallation kann nicht fortgesetzt werden.")
+
+    data_directory = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "StodoMcLauncher"
+
+    try:
+        descriptor, script_name = tempfile.mkstemp(
+            prefix="stodo-launcher-uninstall-",
+            suffix=".ps1",
+        )
+    except OSError as error:
+        raise ShortcutError(f"Die Deinstallation konnte nicht vorbereitet werden: {error}") from error
+    script_path = Path(script_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8-sig") as script_file:
+            script_file.write(_UNINSTALL_SCRIPT)
+        subprocess.Popen(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script_path),
+                "-InstallDirectory",
+                str(target.parent),
+                "-DataDirectory",
+                str(data_directory),
+                "-LauncherProcessId",
+                str(os.getpid()),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            cwd=tempfile.gettempdir(),
+        )
+    except OSError as error:
+        try:
+            script_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as cleanup_error:
+            raise ShortcutError(
+                f"Die Deinstallation konnte nicht gestartet werden: {error}\n"
+                f"Die Hilfsdatei konnte ebenfalls nicht gelöscht werden: {cleanup_error}"
+            ) from error
+        raise ShortcutError(
+            f"Die Deinstallation konnte nicht gestartet werden: {error}"
+        ) from error

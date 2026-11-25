@@ -85,6 +85,72 @@ class ShortcutTests(unittest.TestCase):
 
         popen.assert_not_called()
 
+    def test_schedule_uninstall_targets_installed_launcher_and_local_data(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            executable = root / "Program Files" / shortcuts.APP_NAME / shortcuts.EXE_NAME
+            local_data = root / "LocalAppData"
+            with patch.object(shortcuts.os, "name", "nt"), patch.object(
+                shortcuts.sys, "frozen", True, create=True,
+            ), patch.object(
+                shortcuts.sys, "executable", str(executable),
+            ), patch.object(
+                shortcuts, "installation_path", return_value=executable,
+            ), patch.object(
+                shortcuts.shutil, "which", return_value="powershell.exe",
+            ), patch.object(shortcuts.subprocess, "Popen") as popen, patch.dict(
+                shortcuts.os.environ, {"LOCALAPPDATA": str(local_data)},
+            ):
+                shortcuts.schedule_uninstall()
+
+            command = popen.call_args.args[0]
+            options = popen.call_args.kwargs
+            script_path = Path(command[command.index("-File") + 1])
+            try:
+                self.assertTrue(script_path.read_bytes().startswith(b"\xef\xbb\xbf"))
+                script = script_path.read_text(encoding="utf-8")
+                self.assertIn("while (Get-Process -Id $LauncherProcessId", script)
+                self.assertIn("Set-Location -LiteralPath ([IO.Path]::GetTempPath())", script)
+                self.assertIn("Deinstallation abgeschlossen", script)
+                self.assertIn("Minecraft-Dateien, Mods und Welten bleiben erhalten.", script)
+                self.assertIn("Remove-Item -LiteralPath $target -Recurse -Force", script)
+                self.assertIn("GetFolderPath('DesktopDirectory')", script)
+                self.assertIn("GetFolderPath('Programs')", script)
+                self.assertEqual(
+                    command[command.index("-InstallDirectory") + 1],
+                    str(executable.parent),
+                )
+                self.assertEqual(
+                    command[command.index("-DataDirectory") + 1],
+                    str(local_data / "StodoMcLauncher"),
+                )
+                self.assertEqual(
+                    command[command.index("-LauncherProcessId") + 1],
+                    str(shortcuts.os.getpid()),
+                )
+                self.assertEqual(options["cwd"], tempfile.gettempdir())
+            finally:
+                try:
+                    script_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_schedule_uninstall_rejects_non_installed_executable(self):
+        with patch.object(shortcuts.os, "name", "nt"), patch.object(
+            shortcuts.sys, "frozen", True, create=True,
+        ), patch.object(
+            shortcuts.sys, "executable", "download/StodoMcLauncher.exe",
+        ), patch.object(
+            shortcuts, "installation_path",
+            return_value=Path("Program Files") / shortcuts.APP_NAME / shortcuts.EXE_NAME,
+        ), patch.object(shortcuts.shutil, "which", return_value="powershell.exe"), patch.object(
+            shortcuts.subprocess, "Popen",
+        ) as popen:
+            with self.assertRaisesRegex(shortcuts.ShortcutError, "Installationsordner"):
+                shortcuts.schedule_uninstall()
+
+        popen.assert_not_called()
+
     def test_copy_executable_replaces_the_destination_completely(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "download" / shortcuts.EXE_NAME
@@ -184,6 +250,101 @@ class ShortcutTests(unittest.TestCase):
         root.withdraw.assert_called_once_with()
         root.destroy.assert_called_once_with()
         launcher.assert_not_called()
+
+    def test_uninstall_cancel_keeps_launcher_open(self):
+        launcher = gui.StodoLauncher.__new__(gui.StodoLauncher)
+        launcher.game_running = False
+        launcher.game_status_error = False
+        launcher.launching = False
+        launcher.process = None
+        launcher.root = Mock()
+        launcher.play_button = Mock()
+        launcher.uninstall_button = Mock()
+        launcher.update_checking = False
+        launcher.pending_update = None
+        launcher.fabric_versions = ["fabric"]
+        with patch.object(gui, "_minecraft_is_running", return_value=False), patch.object(
+            gui.messagebox, "askyesno", return_value=False,
+        ) as confirm, patch.object(
+            gui.shortcuts, "schedule_uninstall",
+        ) as schedule, patch.object(launcher, "_close") as close:
+            launcher._uninstall_launcher()
+
+        confirm.assert_called_once()
+        schedule.assert_not_called()
+        close.assert_not_called()
+
+    def test_uninstall_confirmation_schedules_cleanup_and_closes_launcher(self):
+        launcher = gui.StodoLauncher.__new__(gui.StodoLauncher)
+        launcher.game_running = False
+        launcher.game_status_error = False
+        launcher.launching = False
+        launcher.process = None
+        launcher.root = Mock()
+        launcher.play_button = Mock()
+        launcher.uninstall_button = Mock()
+        launcher.update_checking = False
+        launcher.pending_update = None
+        launcher.fabric_versions = ["fabric"]
+        with patch.object(
+            gui, "_minecraft_is_running", side_effect=[False, False],
+        ), patch.object(
+            gui.messagebox, "askyesno", return_value=True,
+        ) as confirm, patch.object(
+            gui.shortcuts, "schedule_uninstall",
+        ) as schedule, patch.object(launcher, "_close") as close:
+            launcher._uninstall_launcher()
+
+        confirm.assert_called_once()
+        schedule.assert_called_once_with()
+        close.assert_called_once_with()
+
+    def test_uninstall_is_blocked_while_game_launches(self):
+        launcher = gui.StodoLauncher.__new__(gui.StodoLauncher)
+        launcher.launching = True
+        launcher.process = None
+        launcher.root = Mock()
+        with patch.object(gui.messagebox, "showwarning") as warning, patch.object(
+            gui.messagebox, "askyesno",
+        ) as confirm, patch.object(
+            gui.shortcuts, "schedule_uninstall",
+        ) as schedule:
+            launcher._uninstall_launcher()
+
+        warning.assert_called_once()
+        confirm.assert_not_called()
+        schedule.assert_not_called()
+
+    def test_uninstall_is_blocked_while_minecraft_is_running(self):
+        launcher = gui.StodoLauncher.__new__(gui.StodoLauncher)
+        launcher.game_running = False
+        launcher.game_status_error = False
+        launcher.launching = False
+        launcher.process = None
+        launcher.root = Mock()
+        launcher.play_button = Mock()
+        launcher.uninstall_button = Mock()
+        launcher.update_checking = False
+        launcher.pending_update = None
+        launcher.fabric_versions = ["fabric"]
+        launcher.status_label = Mock()
+        launcher.status_dot = Mock()
+        launcher._set_status = Mock()
+        with patch.object(gui, "_minecraft_is_running", return_value=True), patch.object(
+            gui.messagebox, "showwarning",
+        ) as warning, patch.object(
+            gui.messagebox, "askyesno",
+        ) as confirm, patch.object(
+            gui.shortcuts, "schedule_uninstall",
+        ) as schedule:
+            launcher._uninstall_launcher()
+
+        warning.assert_called_once()
+        confirm.assert_not_called()
+        schedule.assert_not_called()
+        launcher.uninstall_button.configure.assert_called_with(
+            state="disabled", cursor="arrow",
+        )
 
     def test_normal_startup_shows_the_launcher_window(self):
         root = Mock()

@@ -37,6 +37,7 @@ COLORS = {
     "warning": "#f3ce68",
     "success": "#7abf54",
     "danger": "#e36c61",
+    "danger_hover": "#c65349",
     "disabled": "#777d77",
 }
 
@@ -624,7 +625,15 @@ class StodoLauncher:
             footer, text=f"Version {self.current_version}", fg=COLORS["muted"],
             bg=COLORS["background"], font=("Segoe UI", 9),
         )
-        self.version_label.pack(side="right", padx=(7, 25), pady=12)
+        self.uninstall_button = self._button(
+            footer, "DEINSTALLIEREN", self._uninstall_launcher,
+            bg=COLORS["danger"], hover=COLORS["danger_hover"], height=30,
+            font=("Segoe UI", 8, "bold"),
+        )
+        self.uninstall_button.pack(side="right", padx=(0, 20), pady=5)
+        if os.name != "nt" or not getattr(sys, "frozen", False):
+            self.uninstall_button.configure(state="disabled", cursor="arrow")
+        self.version_label.pack(side="right", padx=(7, 12), pady=12)
 
     def _button(self, parent, text, command, bg, hover, fg=COLORS["text"], height=40,
                 width=None, font=("Segoe UI", 9, "bold")):
@@ -687,6 +696,20 @@ class StodoLauncher:
         self.status_dot.create_oval(2, 2, 10, 10, fill=color, outline="")
 
     def _sync_play_button(self):
+        if hasattr(self, "uninstall_button"):
+            can_uninstall = (
+                os.name == "nt"
+                and getattr(sys, "frozen", False)
+                and not self.game_running
+                and not self.game_status_error
+                and not self.launching
+                and self.process is None
+            )
+            self.uninstall_button.configure(
+                state="normal" if can_uninstall else "disabled",
+                cursor="hand2" if can_uninstall else "arrow",
+            )
+
         if self.game_running:
             self.play_button.configure(
                 state="disabled", text="SPIEL LÄUFT",
@@ -765,6 +788,66 @@ class StodoLauncher:
         except FileNotFoundError:
             pass
         self.root.destroy()
+
+    def _uninstall_launcher(self):
+        if not self._uninstall_is_safe():
+            return
+
+        confirmed = messagebox.askyesno(
+            "Launcher deinstallieren",
+            "Möchtest du Stodo Mc Launcher wirklich deinstallieren?\n\n"
+            "Der Launcher, seine lokalen Dateien, der Anmeldedaten-Cache und die "
+            "Verknüpfungen werden gelöscht. Minecraft-Dateien, Mods und Welten "
+            "bleiben erhalten.",
+            parent=self.root,
+        )
+        if not confirmed or not self._uninstall_is_safe():
+            return
+
+        try:
+            shortcuts.schedule_uninstall()
+        except shortcuts.ShortcutError as error:
+            messagebox.showerror(
+                "Deinstallation fehlgeschlagen",
+                str(error),
+                parent=self.root,
+            )
+            return
+        self._close()
+
+    def _uninstall_is_safe(self):
+        if self.launching or self.process is not None:
+            messagebox.showwarning(
+                "Deinstallation nicht möglich",
+                "Bitte warte, bis der Launcher Minecraft gestartet hat, und versuche es dann erneut.",
+                parent=self.root,
+            )
+            return False
+
+        try:
+            running = _minecraft_is_running()
+        except OSError:
+            self.game_status_error = True
+            self._sync_play_button()
+            messagebox.showerror(
+                "Spielstatus konnte nicht geprüft werden",
+                "Minecraft könnte noch laufen. Schließe das Spiel und versuche es erneut.",
+                parent=self.root,
+            )
+            return False
+
+        self.game_running = running
+        self.game_status_error = False
+        self._sync_play_button()
+        if running:
+            self._set_status("Minecraft läuft")
+            messagebox.showwarning(
+                "Deinstallation nicht möglich",
+                "Schließe Minecraft, bevor du den Launcher deinstallierst.",
+                parent=self.root,
+            )
+            return False
+        return True
 
     def _start_update_check(self):
         threading.Thread(target=self._check_for_update, daemon=True).start()

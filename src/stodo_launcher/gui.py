@@ -274,8 +274,8 @@ class StodoLauncher:
         style.configure(
             "Fabric.TCombobox", fieldbackground=COLORS["panel_light"],
             background=COLORS["panel_light"], foreground=COLORS["text"],
-            arrowcolor=COLORS["accent_light"], bordercolor=COLORS["line"],
-            lightcolor=COLORS["line"], darkcolor=COLORS["line"],
+            arrowcolor=COLORS["accent_light"], bordercolor=COLORS["accent"],
+            lightcolor=COLORS["accent"], darkcolor=COLORS["accent"],
             padding=(10, 8), arrowsize=14,
         )
         style.map(
@@ -284,7 +284,7 @@ class StodoLauncher:
             foreground=[("readonly", COLORS["text"])],
             bordercolor=[("focus", COLORS["accent"])],
             lightcolor=[("focus", COLORS["accent"])],
-            darkcolor=[("focus", COLORS["line"])],
+            darkcolor=[("focus", COLORS["accent"])],
             arrowcolor=[("active", COLORS["accent_light"])],
         )
         self.root.option_add("*TCombobox*Listbox.background", COLORS["panel"])
@@ -581,6 +581,10 @@ class StodoLauncher:
             width=30, style="Fabric.TCombobox",
         )
         self.fabric_picker.pack(side="left")
+        self.fabric_picker.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self.fabric_picker.selection_clear(),
+        )
         if self.fabric_versions:
             self.fabric_picker.current(0)
         else:

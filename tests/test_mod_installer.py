@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import queue
 import tempfile
 import unittest
 import uuid
@@ -215,6 +216,23 @@ class LauncherTests(unittest.TestCase):
             self.assertTrue(backend.acquire_single_instance())
 
         acquire.assert_called_once_with(backend.BACKEND_MUTEX_NAME)
+
+    def test_update_check_keeps_running_game_status_visible(self):
+        launcher = gui.StodoLauncher.__new__(gui.StodoLauncher)
+        launcher.events = queue.Queue()
+        launcher.events.put(("update_current", None))
+        launcher.game_running = True
+        launcher.update_checking = True
+        launcher._sync_play_button = Mock()
+        launcher._set_status = Mock()
+        launcher._read_backend_status = Mock()
+        launcher._refresh_game_state = Mock()
+        launcher._apply_pending_update = Mock()
+        launcher.root = Mock()
+
+        launcher._poll()
+
+        launcher._set_status.assert_any_call("Minecraft läuft")
 
     def test_play_button_is_gray_and_disabled_while_game_is_running(self):
         launcher = object.__new__(gui.StodoLauncher)

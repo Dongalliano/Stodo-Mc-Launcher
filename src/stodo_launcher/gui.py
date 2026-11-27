@@ -225,10 +225,10 @@ class StodoLauncher:
         self._make_window()
         self._make_layout()
         self._sync_play_button()
-        if self.update_checking:
-            self._set_status("Prüfe auf Launcher-Updates ...", COLORS["warning"])
-        elif self.game_running:
+        if self.game_running:
             self._set_status("Minecraft läuft")
+        elif self.update_checking:
+            self._set_status("Prüfe auf Launcher-Updates ...", COLORS["warning"])
         elif self.game_status_error:
             self._set_status("Spielstatus konnte nicht geprüft werden.", COLORS["danger"])
             self.root.after_idle(lambda: messagebox.showerror(
@@ -1034,8 +1034,10 @@ class StodoLauncher:
             elif kind == "update_current":
                 self.update_checking = False
                 self._sync_play_button()
-                if not self.game_running:
-                    self._set_status("Der Launcher ist auf dem neuesten Stand.")
+                self._set_status(
+                    "Minecraft läuft" if self.game_running
+                    else "Der Launcher ist auf dem neuesten Stand."
+                )
             elif kind == "update_error":
                 self.update_checking = False
                 self._sync_play_button()
